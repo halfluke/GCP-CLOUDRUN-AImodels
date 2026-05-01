@@ -1,0 +1,47 @@
+FROM __BASE_MODEL__
+TEMPLATE """{{- if or .System .Tools }}<|im_start|>system
+{{- if .System }}
+
+{{ .System }}
+{{- end }}
+{{- if .Tools }}
+
+When you receive a tool call response, use the output to format an answer to the original user question.
+
+You are a helpful assistant with tool calling capabilities.
+{{- end }}<|im_end|>
+{{- end }}
+{{- range $i, $_ := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 }}
+{{- if eq .Role "user" }}<|im_start|>user
+{{- if and $.Tools $last }}
+
+Given the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.
+
+Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. Do not use variables.
+
+{{ range $.Tools }}
+{{- . }}
+{{ end }}
+Question: {{ .Content }}<|im_end|>
+{{- else }}
+
+{{ .Content }}<|im_end|>
+{{- end }}{{ if $last }}<|im_start|>assistant
+
+{{ end }}
+{{- else if eq .Role "assistant" }}<|im_start|>assistant
+{{- if .ToolCalls }}
+{{ range .ToolCalls }}
+{"name": "{{ .Function.Name }}", "parameters": {{ .Function.Arguments }}}{{ end }}
+{{- else }}
+
+{{ .Content }}
+{{- end }}{{ if not $last }}<|im_end|>{{ end }}
+{{- else if eq .Role "tool" }}<|im_start|>ipython
+
+{{ .Content }}<|im_end|>{{ if $last }}<|im_start|>assistant
+
+{{ end }}
+{{- end }}
+{{- end -}}"""

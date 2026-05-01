@@ -1,0 +1,25 @@
+FROM vllm/vllm-openai:latest
+
+ARG MODEL_ID=DeepHat/DeepHat-V1-7B
+ARG HF_TOKEN=
+
+ENV VLLM_HOST=0.0.0.0
+ENV VLLM_PORT=8080
+ENV MODEL_PATH=/models/model
+ENV SERVE_MODEL_NAME=${MODEL_ID}
+ENV DTYPE=auto
+ENV MAX_MODEL_LEN=4096
+ENV GPU_MEMORY_UTILIZATION=0.85
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=1
+ENV ENABLE_AUTO_TOOL_CHOICE=true
+ENV TOOL_CALL_PARSER=hermes
+
+# Pre-download model files at image build time to avoid Cloud Run startup probe
+# failures caused by runtime HF pulls.
+RUN mkdir -p /models && \
+    MODEL_ID="${MODEL_ID}" HF_TOKEN="${HF_TOKEN}" python3 -c "import os; from huggingface_hub import snapshot_download; model_id=os.environ.get('MODEL_ID','DeepHat/DeepHat-V1-7B'); token=os.environ.get('HF_TOKEN',''); kwargs={'repo_id': model_id, 'local_dir':'/models/model'}; kwargs.update({'token': token} if token else {}); snapshot_download(**kwargs)"
+
+EXPOSE 8080
+
+ENTRYPOINT ["/bin/sh", "-lc"]
+CMD ["vllm serve ${MODEL_PATH} --served-model-name ${SERVE_MODEL_NAME} --host ${VLLM_HOST} --port ${VLLM_PORT} --dtype ${DTYPE} --max-model-len ${MAX_MODEL_LEN} --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} --enable-auto-tool-choice --tool-call-parser ${TOOL_CALL_PARSER}"]

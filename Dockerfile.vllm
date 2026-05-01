@@ -1,0 +1,21 @@
+FROM vllm/vllm-openai:latest
+
+# vLLM OpenAI-compatible server config
+ENV VLLM_HOST=0.0.0.0
+ENV VLLM_PORT=8080
+ENV MODEL_ID=DeepHat/DeepHat-V1-7B
+ENV DTYPE=auto
+ENV MAX_MODEL_LEN=8192
+ENV GPU_MEMORY_UTILIZATION=0.90
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=1
+ENV ENABLE_AUTO_TOOL_CHOICE=true
+ENV TOOL_CALL_PARSER=hermes
+
+# Optional for gated/private HF models:
+# pass at deploy time as env var HUGGING_FACE_HUB_TOKEN
+ENV HUGGING_FACE_HUB_TOKEN=""
+
+EXPOSE 8080
+
+ENTRYPOINT ["/bin/sh", "-lc"]
+CMD ["vllm serve ${MODEL_ID} --host ${VLLM_HOST} --port ${VLLM_PORT} --dtype ${DTYPE} --max-model-len ${MAX_MODEL_LEN} --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} --enable-auto-tool-choice --tool-call-parser ${TOOL_CALL_PARSER}"]
