@@ -1,13 +1,5 @@
 # Cloud Run Ollama Quickstart
 
-<p align="center">
-  <strong>Optional Streamlit agent UI</strong> — <code>streamlit run scripts/offsec_streamlit_app.py</code><br><br>
-  <a href="docs/sneakpeek.mp4"><strong>▶ Watch demo (MP4)</strong></a>
-</p>
-
-> [!TIP]
-> **Inline video in this README on GitHub:** the HTML `<video>` tag is not reliably rendered in `README.md`. The link above opens the file on GitHub (browser playback / download). For a **player embedded in the README**, edit this file **on github.com** (pencil icon), drag **`docs/sneakpeek.mp4`** into the editor, and commit the generated **`https://github.com/user-attachments/assets/…`** URL—GitHub turns that into an inline player.
-
 > **Disclaimer:** For authorized, legal use only (labs, learning, or environments where you have explicit permission). You are responsible for compliance, safety, and credential handling. **Do not commit** service-account JSON, raw API keys, Hugging Face tokens, or `.env` files — keep secrets in environment variables or Secret Manager; this repo’s `.gitignore` only helps if you never force-add sensitive files.
 
 Minimal commands for deploying Ollama or vLLM on Cloud Run, proxying locally, and wiring editors like Continue.

@@ -46,3 +46,6 @@ coverage/
 # Continue / local tool state
 .continue/
 
+# Local screen captures (privacy / size)
+docs/sneakpeek.mp4
+
