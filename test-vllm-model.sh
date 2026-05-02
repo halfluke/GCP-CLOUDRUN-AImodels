@@ -7,13 +7,15 @@ set -euo pipefail
 #
 # Usage examples:
 #   MODEL_ID="DeepHat/DeepHat-V1-7B" ./test-vllm-model.sh
-#   MODEL_ID="huihui-ai/Qwen2.5-7B-Instruct-abliterated" VLLM_BASE_URL="http://127.0.0.1:8080" ./test-vllm-model.sh
+#   MODEL_ID="..." VLLM_BASE_URL="http://127.0.0.1:8080" TOOL_CHOICE=required ./test-vllm-model.sh
 #   MODEL_ID="..." VLLM_API_KEY="dummy" ./test-vllm-model.sh
 
 MODEL_ID="${MODEL_ID:-}"
 VLLM_BASE_URL="${VLLM_BASE_URL:-http://127.0.0.1:8080}"
 VLLM_API_KEY="${VLLM_API_KEY:-}"
 MAX_TOKENS="${MAX_TOKENS:-128}"
+# Try TOOL_CHOICE=required if auto leaves tool_calls empty (model + parser dependent).
+TOOL_CHOICE="${TOOL_CHOICE:-auto}"
 
 if [[ -z "${MODEL_ID}" ]]; then
   echo "MODEL_ID is required."
@@ -46,7 +48,7 @@ TOOL_PAYLOAD="$(cat <<EOF
   "model":"${MODEL_ID}",
   "messages":[{"role":"user","content":"Use test tool with city=London. Do not answer directly."}],
   "tools":[{"type":"function","function":{"name":"test","description":"test","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],
-  "tool_choice":"auto",
+  "tool_choice":"${TOOL_CHOICE}",
   "max_tokens":${MAX_TOKENS},
   "stream":false
 }
@@ -61,7 +63,7 @@ CHAT_RESP="$(curl -sS "${VLLM_BASE_URL}/v1/chat/completions" \
 echo "${CHAT_RESP}"
 echo
 
-echo "==> Tool-call test"
+echo "==> Tool-call test (tool_choice=${TOOL_CHOICE})"
 TOOL_RESP="$(curl -sS "${VLLM_BASE_URL}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   "${AUTH_HEADER[@]}" \
@@ -92,7 +94,7 @@ if command -v jq >/dev/null 2>&1; then
           then "true"
           elif (($parsed | type) == "object")
              and (($parsed.name? // null) != null)
-             and (($parsed.arguments? // null) != null))
+             and (($parsed.arguments? // null) != null)
           then "true"
           else "false"
           end
@@ -105,9 +107,9 @@ if command -v jq >/dev/null 2>&1; then
   else
     echo "result: no structured tool_calls"
     if [[ "${PARSEABLE_TOOL_JSON}" == "true" ]]; then
-      echo "note: parseable tool JSON detected in message.content (shim likely helps)"
+      echo "note: parseable tool JSON in message.content (clients need native tool_calls)"
     elif [[ -n "${CONTENT_PREVIEW}" ]]; then
-      echo "note: message.content is plain text/non-parseable JSON (shim unlikely to help)"
+      echo "note: message.content is plain text/non-parseable as tool JSON"
     fi
   fi
 else

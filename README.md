@@ -1,5 +1,13 @@
 # Cloud Run Ollama Quickstart
 
+<p align="center">
+  <strong>Optional Streamlit agent UI</strong> — <code>streamlit run scripts/offsec_streamlit_app.py</code><br><br>
+  <a href="docs/sneakpeek.mp4"><strong>▶ Watch demo (MP4)</strong></a>
+</p>
+
+> [!TIP]
+> **Inline video in this README on GitHub:** the HTML `<video>` tag is not reliably rendered in `README.md`. The link above opens the file on GitHub (browser playback / download). For a **player embedded in the README**, edit this file **on github.com** (pencil icon), drag **`docs/sneakpeek.mp4`** into the editor, and commit the generated **`https://github.com/user-attachments/assets/…`** URL—GitHub turns that into an inline player.
+
 > **Disclaimer:** For authorized, legal use only (labs, learning, or environments where you have explicit permission). You are responsible for compliance, safety, and credential handling. **Do not commit** service-account JSON, raw API keys, Hugging Face tokens, or `.env` files — keep secrets in environment variables or Secret Manager; this repo’s `.gitignore` only helps if you never force-add sensitive files.
 
 Minimal commands for deploying Ollama or vLLM on Cloud Run, proxying locally, and wiring editors like Continue.
@@ -14,6 +22,7 @@ Minimal commands for deploying Ollama or vLLM on Cloud Run, proxying locally, an
 - [Reference: Cloud Run models & tooling paths](#5-reference-cloud-run-models--tooling-paths)
 - [Continue (VS Code)](#6-continue-vs-code-with-cloud-run-ollama)
 - [Helper scripts](#7-helper-scripts)
+- [Streamlit UI (optional)](#streamlit-ui-optional)
 - [Optional: OpenWebUI](#8-optional-openwebui-bridge)
 - [L4 sizing](#l4-sizing-quick-guide)
 - [Common errors](#common-errors)
@@ -227,6 +236,37 @@ If you hit **`maximum context length` / HTTP 400** after large **`list_files`** 
 
 **Follow-up generation:** keep **`--max-tokens`** modest (e.g. **512–1024**); use **`--max-tokens 0`** only if you accept server-default (often very slow).
 
+### Streamlit UI (optional)
+
+Same tool loop as **`scripts/offsec_agent_loop.py`**, in a browser: **Connection** (Ollama or OpenAI-compatible), **workspace** tools, and chat transcript.
+
+**Install**
+
+```bash
+pip install -r requirements-streamlit.txt
+```
+
+**Run** (from the repo root; the default workspace **`.`** is the directory you start Streamlit from)
+
+```bash
+streamlit run scripts/offsec_streamlit_app.py
+```
+
+**Connection**
+
+- **Backend:** **`openai`** for vLLM / OpenAI-style servers (**`/v1/chat/completions`**), **`ollama`** for **`/api/chat`**.
+- **Base URL:** usually **host + port only**, e.g. **`http://127.0.0.1:8080`** after `gcloud run services proxy … --port 8080`, or **`http://127.0.0.1:11434`** for Ollama. If your base URL already ends with **`/v1`**, the app matches the agent loop’s chat and model-list URLs (no doubled **`/v1/v1/...`**).
+- **Models:** Filled from **`GET /v1/models`** (OpenAI) or **`GET /api/tags`** (Ollama). Use **Refresh models** after the service wakes up. Serverless cold starts (e.g. Cloud Run) can take a minute or two — listing uses a long HTTP timeout and retries on transient errors; **Refresh** again if the first attempt is empty. **Skip TLS certificate verify** is for dev/self-signed HTTPS only. **Override model id** wins over the dropdown when non-empty.
+- **API key:** sent as **`Authorization: Bearer …`** when set (Cloud Run identity is usually handled by **`gcloud run services proxy`**, not by this field).
+
+**Agent**
+
+- **Workspace (`--base-dir`)**, **Allow shell**, inner-step and token limits, **context limit**, and tool payload caps mirror the CLI script.
+- **Temperature** defaults to **0.2**, with **−** / **+** stepping within **0.0–2.0** (many backends clamp or ignore; OpenAI-style APIs often document **0–2**).
+- **Extra system instructions** are merged **after** the built-in **`DEFAULT_SYSTEM`**. The default textarea text nudges honest tool reporting (no invented paths/commands). If you clear the box, a short anti-hallucination block is still applied; edit the text to replace that behavior.
+
+Click **Reset chat** after changing model, base URL, or workspace so the system message and history match the sidebar.
+
 ---
 
 ## 4) vLLM (Hugging Face models, OpenAI-compatible API)
@@ -264,9 +304,15 @@ gcloud run services proxy deephat-vllm-7b-prebaked --region europe-west1 --port 
 MODEL_ID="DeepHat/DeepHat-V1-7B" \
 VLLM_BASE_URL="http://127.0.0.1:8080" \
 ./test-vllm-model.sh
+
+# With auth (if your endpoint requires a Bearer token):
+# MODEL_ID="..." VLLM_BASE_URL="https://..." VLLM_API_KEY="..." ./test-vllm-model.sh
+
+# If the tool-call check shows empty tool_calls but the model can tool-call, try:
+# TOOL_CHOICE=required MODEL_ID="..." VLLM_BASE_URL="http://127.0.0.1:8080" ./test-vllm-model.sh
 ```
 
-Treat many uncensored/custom checkpoints as **chat-first** unless your smoke test shows clean structured tools.
+Treat many uncensored/custom checkpoints as **chat-first** unless your smoke test shows clean structured tools. The script sets **`tool_choice`** from **`TOOL_CHOICE`** (default **`auto`**; **`required`** can surface **`message.tool_calls`** on some stacks).
 
 ### Raising `MAX_MODEL_LEN` on an existing vLLM service (no image rebuild)
 
@@ -464,6 +510,7 @@ Use the exact `name` from `/api/tags` in Continue’s `model` field. For **`prov
 
 | Script | Purpose |
 |--------|---------|
+| `scripts/offsec_streamlit_app.py` | Optional **Streamlit** front-end for the Python agent loop (see [Streamlit UI](#streamlit-ui-optional)); `pip install -r requirements-streamlit.txt` then `streamlit run scripts/offsec_streamlit_app.py`. |
 | `./proxy.sh` | `gcloud run services proxy` helper: **`qwen`** → `qwen3-8b`, **`deepseek`** → `deepseek-r1-8b`, **`redteam`** / **`nu11`** → `nu11-redteamlite-ollama`, **`deephat`** → `deephat-vllm-7b-prebaked` (local port **8080** by default), **`list`**, or pass any Cloud Run **service name**. Override port with **`PORT=…`**. |
 | `./unstick.sh` | Same shortcuts as **`proxy.sh`** (**`qwen`**, **`deepseek`**, **`redteam`** / **`nu11`**, **`deephat`**, or raw service name) — bumps **`UNSTICK_NONCE`** to roll the revision |
 

@@ -13,7 +13,7 @@ Supported tool output formats:
   - Fenced JSON: ```json ... ```
   - Qwen-style tag: <tool_call>{{...}}</tool_call>
 
-Built-in tools:
+Built-in tools (all filesystem paths must resolve inside ``--base-dir`` / workspace root):
   - list_files(path=".")
   - read_file(path)
   - write_file(path, content, append=False, mkdirs=True)
@@ -32,6 +32,9 @@ Examples:
     --base-url http://127.0.0.1:8080 \
     --model DeepHat/DeepHat-V1-7B \
     --prompt "Run pwd with run_terminal_command."
+
+  streamlit run scripts/offsec_streamlit_app.py
+  # requires: pip install -r requirements-streamlit.txt
 """
 
 from __future__ import annotations
@@ -44,10 +47,47 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 from urllib import error, request
 
 Backend = Literal["ollama", "openai"]
+
+
+class AgentObserver(Protocol):
+    """Optional UI sink for :func:`run_agent_steps` (default is terminal prints)."""
+
+    def info(self, msg: str) -> None: ...
+    def assistant_turn(self, step: int, max_steps: int, content: str) -> None: ...
+    def tool_call(
+        self, name: str, arguments: dict[str, Any], result: dict[str, Any]
+    ) -> None: ...
+    def truncated_in_history(self) -> None: ...
+
+
+class PrintObserver:
+    """Default observer: mirror historical ``print`` behaviour."""
+
+    def info(self, msg: str) -> None:
+        print(msg, flush=True)
+
+    def assistant_turn(self, step: int, max_steps: int, content: str) -> None:
+        print(f"\n--- step {step} assistant ---", flush=True)
+        print(content if content else "(empty content)", flush=True)
+
+    def tool_call(
+        self, name: str, arguments: dict[str, Any], result: dict[str, Any]
+    ) -> None:
+        print(
+            f"\n[tool] {name}({json.dumps(arguments, ensure_ascii=False)})",
+            flush=True,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+
+    def truncated_in_history(self) -> None:
+        print("  (truncated in chat history sent back to model)", flush=True)
+
+
+_DEFAULT_PRINT_OBSERVER = PrintObserver()
 
 
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
@@ -232,6 +272,8 @@ def chat_endpoint(base_url: str, backend: Backend) -> str:
     base = base_url.rstrip("/")
     if backend == "ollama":
         return f"{base}/api/chat"
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
 
 
@@ -326,23 +368,78 @@ def parse_tool_calls_from_text(content: str | None) -> list[ToolCall]:
     return []
 
 
-def to_path(base_dir: Path, raw: str) -> Path:
-    s = raw.strip()
-    if s.startswith("~/"):
-        return Path(os.path.expanduser(s)).resolve()
-    if s.startswith("/"):
-        return Path(s).resolve()
-    if s.startswith("home/"):
-        return Path("/" + s).resolve()
-    return (base_dir / s).resolve()
-
-
-def path_must_be_under_base(p: Path, base_dir: Path) -> dict[str, Any] | None:
-    """Return an error dict if p is not under base_dir (after resolve)."""
+def path_must_be_under_base(p: Path, base_r: Path) -> dict[str, Any] | None:
+    """Return an error dict if *p* is not under *base_r* (each path resolved)."""
     try:
-        p.resolve().relative_to(base_dir.resolve())
+        p.resolve().relative_to(base_r.resolve())
     except ValueError:
         return {"ok": False, "error": f"path outside workspace (--base-dir): {p}"}
+    return None
+
+
+def resolve_workspace_path(
+    base_dir: Path, raw: str
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """Resolve *raw* under workspace rules; fail if the result leaves ``base_dir``."""
+    base_r = base_dir.resolve()
+    s = (raw or ".").strip() or "."
+    if s.startswith("~/"):
+        p = Path(os.path.expanduser(s)).resolve()
+    elif s.startswith("/"):
+        p = Path(s).resolve()
+    elif s.startswith("home/"):
+        p = Path("/" + s).resolve()
+    else:
+        p = (base_dir / s).resolve()
+    err = path_must_be_under_base(p, base_r)
+    if err:
+        return None, err
+    return p, None
+
+
+_SHELL_SEGMENT_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\n)\s*")
+
+
+def check_shell_cd_stays_in_workspace(
+    command: str, cwd: Path, base_dir: Path
+) -> dict[str, Any] | None:
+    """Reject if a top-level ``cd`` in the command would leave the workspace.
+
+    Best-effort only: subshells, ``eval``, heredocs, and arbitrary binaries can
+    still escape — use ``--allow-shell`` only when you accept that residual risk.
+    """
+    base_r = base_dir.resolve()
+    cwd_err = path_must_be_under_base(cwd, base_r)
+    if cwd_err:
+        return cwd_err
+    cur = cwd.resolve()
+    cd_re = re.compile(r"^\s*cd\s+(.+?)\s*$", re.IGNORECASE)
+    for seg in _SHELL_SEGMENT_SPLIT.split(command):
+        seg = seg.strip()
+        if not seg or seg.startswith("#"):
+            continue
+        m = cd_re.match(seg)
+        if not m:
+            continue
+        raw_target = m.group(1).strip().strip("'\"")
+        if raw_target in {"", ".", "-", "$OLDPWD"}:
+            continue
+        if raw_target.startswith("~/"):
+            nxt = Path(os.path.expanduser(raw_target)).resolve()
+        elif raw_target.startswith("/"):
+            nxt = Path(raw_target).resolve()
+        else:
+            nxt = (cur / raw_target).resolve()
+        err = path_must_be_under_base(nxt, base_r)
+        if err:
+            return {
+                "ok": False,
+                "error": (
+                    f"refusing shell: cd to {raw_target!r} resolves to {nxt}, "
+                    f"outside workspace {base_r}"
+                ),
+            }
+        cur = nxt
     return None
 
 
@@ -413,7 +510,10 @@ def capped_output_tokens(
 
 
 def tool_list_files(args: dict[str, Any], base_dir: Path) -> dict[str, Any]:
-    p = to_path(base_dir, str(args.get("path", ".")))
+    p, err = resolve_workspace_path(base_dir, str(args.get("path", ".")))
+    if err:
+        return err
+    assert p is not None
     if not p.exists():
         return {"ok": False, "error": f"path does not exist: {p}"}
     if not p.is_dir():
@@ -426,7 +526,10 @@ def tool_read_file(args: dict[str, Any], base_dir: Path) -> dict[str, Any]:
     raw = args.get("path")
     if not isinstance(raw, str):
         return {"ok": False, "error": "path is required (string)"}
-    p = to_path(base_dir, raw)
+    p, err = resolve_workspace_path(base_dir, raw)
+    if err:
+        return err
+    assert p is not None
     if not p.exists():
         return {"ok": False, "error": f"file does not exist: {p}"}
     if p.is_dir():
@@ -447,7 +550,10 @@ def tool_write_file(args: dict[str, Any], base_dir: Path) -> dict[str, Any]:
         return {"ok": False, "error": "path is required (string)"}
     if not isinstance(content, str):
         return {"ok": False, "error": "content must be string"}
-    p = to_path(base_dir, raw)
+    p, err = resolve_workspace_path(base_dir, raw)
+    if err:
+        return err
+    assert p is not None
     try:
         if mkdirs:
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -463,10 +569,10 @@ def tool_delete_file(args: dict[str, Any], base_dir: Path) -> dict[str, Any]:
     raw = args.get("path")
     if not isinstance(raw, str):
         return {"ok": False, "error": "path is required (string)"}
-    p = to_path(base_dir, raw)
-    err = path_must_be_under_base(p, base_dir)
+    p, err = resolve_workspace_path(base_dir, raw)
     if err:
         return err
+    assert p is not None
     if not p.exists():
         return {"ok": False, "error": f"path does not exist: {p}"}
     if p.is_dir():
@@ -485,7 +591,13 @@ def tool_run_shell(args: dict[str, Any], base_dir: Path, allow_shell: bool) -> d
     if not isinstance(cmd, str) or not cmd.strip():
         return {"ok": False, "error": "command is required (string)"}
     cwd_raw = args.get("cwd", ".")
-    cwd = to_path(base_dir, str(cwd_raw))
+    cwd, err = resolve_workspace_path(base_dir, str(cwd_raw))
+    if err:
+        return err
+    assert cwd is not None
+    cd_err = check_shell_cd_stays_in_workspace(cmd, cwd, base_dir)
+    if cd_err:
+        return cd_err
     try:
         proc = subprocess.run(  # noqa: S603
             cmd,
@@ -549,13 +661,18 @@ def extract_calls_from_response(resp: dict[str, Any]) -> list[ToolCall]:
     return dedupe_calls(parse_tool_calls_from_text(msg.get("content")))
 
 
-def build_tools() -> list[dict[str, Any]]:
-    return [
+def build_tools(*, allow_shell: bool = True) -> list[dict[str, Any]]:
+    """OpenAI-style tool definitions sent to the model.
+
+    When ``allow_shell`` is false, ``run_terminal_command`` is omitted so the model
+    is not prompted with a tool it cannot run.
+    """
+    tools: list[dict[str, Any]] = [
         {
             "type": "function",
             "function": {
                 "name": "list_files",
-                "description": "List directory entries",
+                "description": "List directory entries. Path must stay inside the workspace root (no .. escapes).",
                 "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
             },
         },
@@ -563,7 +680,7 @@ def build_tools() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read file content",
+                "description": "Read a file; path must resolve inside the workspace root.",
                 "parameters": {
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -575,7 +692,7 @@ def build_tools() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "Write file content",
+                "description": "Write file content; path must resolve inside the workspace root.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -592,7 +709,7 @@ def build_tools() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "delete_file",
-                "description": "Delete a file under the workspace (--base-dir). Refuses directories.",
+                "description": "Delete a file under the workspace only (--base-dir). Refuses directories.",
                 "parameters": {
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -600,22 +717,29 @@ def build_tools() -> list[dict[str, Any]]:
                 },
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_terminal_command",
-                "description": "Run a terminal command in cwd (disabled unless --allow-shell).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string"},
-                        "cwd": {"type": "string"},
-                    },
-                    "required": ["command"],
-                },
-            },
-        },
     ]
+    if allow_shell:
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_terminal_command",
+                    "description": (
+                        "Run shell with cwd inside the workspace. Top-level cd that leaves "
+                        "the workspace is rejected; this is not a full sandbox (e.g. cat /etc/passwd may work)."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "cwd": {"type": "string"},
+                        },
+                        "required": ["command"],
+                    },
+                },
+            }
+        )
+    return tools
 
 
 def run_agent_steps(
@@ -634,7 +758,9 @@ def run_agent_steps(
     context_limit: int,
     max_list_entries: int,
     max_tool_chars: int,
+    observer: AgentObserver | None = None,
 ) -> int:
+    obs = observer if observer is not None else _DEFAULT_PRINT_OBSERVER
     extra_headers: dict[str, str] | None = None
     if api_key:
         extra_headers = {"Authorization": f"Bearer {api_key}"}
@@ -660,14 +786,12 @@ def run_agent_steps(
             else 0
         )
         if max_tokens > 0 and eff_mt < max_tokens:
-            print(
-                f"  (max_tokens {max_tokens} → {eff_mt} for ~{context_limit} context budget)",
-                flush=True,
+            obs.info(
+                f"  (max_tokens {max_tokens} → {eff_mt} for ~{context_limit} context budget)"
             )
         if max_tokens > 0 and eff_mt <= 48:
-            print(
-                "  (warning: tight context — shorten chat, list smaller dirs, or raise server max_model_len)",
-                flush=True,
+            obs.info(
+                "  (warning: tight context — shorten chat, list smaller dirs, or raise server max_model_len)"
             )
 
         if backend == "openai":
@@ -688,25 +812,24 @@ def run_agent_steps(
         # Tool output prints right after each tool runs; this POST asks for the next assistant
         # message (prose or more tools). Without a token cap, vLLM may generate for a long time.
         cap = f", gen_cap≈{eff_mt}" if eff_mt > 0 else ""
-        print(f"\n→ calling API (inner step {step}/{max_steps}{cap}) …", flush=True)
+        obs.info(f"\n→ calling API (inner step {step}/{max_steps}{cap}) …")
         raw = http_post_json(url, payload, extra_headers=extra_headers)
         resp = normalize_chat_response(backend, raw)
         msg = resp.get("message", {})
-        content = msg.get("content") or ""
-        print(f"\n--- step {step} assistant ---")
-        if content:
-            print(content)
-        else:
-            print("(empty content)")
+        raw_c = msg.get("content")
+        text_out = raw_c if isinstance(raw_c, str) else ""
+        obs.assistant_turn(step, max_steps, text_out)
 
         calls = extract_calls_from_response(resp)
         if not calls:
-            print("\n(no tool calls detected; done)")
+            if text_out.strip():
+                messages.append({"role": "assistant", "content": text_out})
+            obs.info("\n(no tool calls detected; done)")
             return 0
 
         sig = calls_signature(calls)
         if prev_sig is not None and sig == prev_sig:
-            print(
+            obs.info(
                 "\n(stopping: model repeated the same tool batch; "
                 "say 'summarize only' or raise --max-steps if needed)"
             )
@@ -753,8 +876,7 @@ def run_agent_steps(
 
         for c, tid in zip(calls, call_ids, strict=True):
             result = execute_tool(c, base_dir, allow_shell)
-            print(f"\n[tool] {c.name}({json.dumps(c.arguments, ensure_ascii=False)})")
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            obs.tool_call(c.name, c.arguments, result)
             payload_result = shrink_tool_payload_for_llm(
                 result,
                 c.name,
@@ -762,7 +884,7 @@ def run_agent_steps(
                 max_tool_chars=max_tool_chars,
             )
             if payload_result != result:
-                print("  (truncated in chat history sent back to model)", flush=True)
+                obs.truncated_in_history()
             tool_body = json.dumps(payload_result, ensure_ascii=False)
             if backend == "openai":
                 messages.append(
@@ -783,7 +905,7 @@ def run_agent_steps(
 
         prev_sig = sig
 
-    print("\n(max steps reached for this turn)")
+    obs.info("\n(max steps reached for this turn)")
     return 0
 
 
@@ -815,7 +937,7 @@ def run_single_prompt(
     messages: list[dict[str, Any]] = []
     append_initial_system(messages, system)
     messages.append({"role": "user", "content": prompt})
-    tools = build_tools()
+    tools = build_tools(allow_shell=allow_shell)
     url = chat_endpoint(base_url, backend)
     return run_agent_steps(
         backend=backend,
@@ -853,7 +975,7 @@ def run_interactive(
 ) -> int:
     messages: list[dict[str, Any]] = []
     append_initial_system(messages, system)
-    tools = build_tools()
+    tools = build_tools(allow_shell=allow_shell)
     url = chat_endpoint(base_url, backend)
     print("Interactive mode ready. Type /exit (or /quit) to stop.")
     while True:

@@ -1,0 +1,2 @@
+# Optional: Streamlit UI for scripts/offsec_agent_loop.py
+streamlit>=1.31.0
