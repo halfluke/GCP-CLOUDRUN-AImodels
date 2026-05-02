@@ -1,5 +1,17 @@
 # Cloud Run Ollama Quickstart
 
+<p align="center"><strong>Optional Streamlit agent UI</strong> — <code>streamlit run scripts/offsec_streamlit_app.py</code></p>
+
+<p align="center">
+  <img src="docs/readme-screenshots/streamlit-no-shell.png" alt="Streamlit Offsec agent — tools without shell" width="85%"><br>
+  <sub>Tools available without enabling shell.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/readme-screenshots/streamlit-outside-workdir.png" alt="Streamlit Offsec agent — path outside workspace blocked" width="85%"><br>
+  <sub>Workspace containment: paths outside <code>--base-dir</code> are rejected.</sub>
+</p>
+
 > **Disclaimer:** For authorized, legal use only (labs, learning, or environments where you have explicit permission). You are responsible for compliance, safety, and credential handling. **Do not commit** service-account JSON, raw API keys, Hugging Face tokens, or `.env` files — keep secrets in environment variables or Secret Manager; this repo’s `.gitignore` only helps if you never force-add sensitive files.
 
 Minimal commands for deploying Ollama or vLLM on Cloud Run, proxying locally, and wiring editors like Continue.
