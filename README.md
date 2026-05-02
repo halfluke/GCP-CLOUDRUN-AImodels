@@ -3,8 +3,8 @@
 <p align="center"><strong>Optional Streamlit agent UI</strong> — <code>streamlit run scripts/offsec_streamlit_app.py</code></p>
 
 <p align="center">
-  <img src="docs/readme-screenshots/streamlit-no-shell.png" alt="Streamlit Offsec agent — tools without shell" width="85%"><br>
-  <sub>Tools available without enabling shell.</sub>
+  <img src="docs/readme-screenshots/streamlit-no-shell.png" alt="Streamlit Offsec agent — shell tool not in schema until Allow shell is enabled" width="85%"><br>
+  <sub>tools NOT available without enabling shell.</sub>
 </p>
 
 <p align="center">
