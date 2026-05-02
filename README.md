@@ -1,10 +1,10 @@
-# Cloud Run Ollama Quickstart
+# Cloud Run Ollama / vLLM Quick Start
 
 <p align="center"><strong>Optional Streamlit agent UI</strong> — <code>streamlit run scripts/offsec_streamlit_app.py</code></p>
 
 <p align="center">
   <img src="docs/readme-screenshots/streamlit-no-shell.png" alt="Streamlit Offsec agent — shell tool not in schema until Allow shell is enabled" width="85%"><br>
-  <sub>tools NOT available without enabling shell.</sub>
+  <sub>Tools NOT available without enabling shell.</sub>
 </p>
 
 <p align="center">
@@ -14,22 +14,24 @@
 
 > **Disclaimer:** For authorized, legal use only (labs, learning, or environments where you have explicit permission). You are responsible for compliance, safety, and credential handling. **Do not commit** service-account JSON, raw API keys, Hugging Face tokens, or `.env` files — keep secrets in environment variables or Secret Manager; this repo’s `.gitignore` only helps if you never force-add sensitive files.
 
-Minimal commands for deploying Ollama or vLLM on Cloud Run, proxying locally, and wiring editors like Continue.
+Minimal commands for deploying **Ollama** and **vLLM** on **Google Cloud Run**, proxying services locally, optional **Streamlit** / **Python** agent workflows, and wiring editors like **Continue**.
 
 ## Contents
 
-- [One-time setup](#0-one-time-setup-per-projectregion)
+- [One-time setup](#0-one-time-setup-per-project-region)
 - [Deploy Ollama](#1-deploy-ollama)
-- [Test & destroy](#2-test--destroy)
+- [Test & destroy](#2-test-destroy)
 - [Tools: docs, “tool compatible” labels, and workarounds](#3-tools-docs-tool-compatible-labels-and-workarounds)
 - [vLLM (HF models, OpenAI-style API)](#4-vllm-hugging-face-models-openai-compatible-api)
-- [Reference: Cloud Run models & tooling paths](#5-reference-cloud-run-models--tooling-paths)
-- [Continue (VS Code)](#6-continue-vs-code-with-cloud-run-ollama)
+- [Reference: Cloud Run models & tooling paths](#5-reference-cloud-run-models-tooling-paths)
+- [Continue (VS Code)](#6-continue-vs-code-with-cloud-run-ollama-and-vllm)
 - [Helper scripts](#7-helper-scripts)
-- [Streamlit UI (optional)](#streamlit-ui-optional)
+- [Streamlit UI (optional)](#streamlit-ui-optional) — *subsection of §3*
 - [Optional: OpenWebUI](#8-optional-openwebui-bridge)
-- [L4 sizing](#l4-sizing-quick-guide)
-- [Common errors](#common-errors)
+- [L4 sizing](#9-l4-sizing-quick-guide)
+- [Common errors](#10-common-errors)
+
+On **github.com**, if a jump link above does not match (GitHub’s slug rules can change), use the **Outline** (≡) on the rendered `README` for working section anchors.
 
 ---
 
@@ -403,25 +405,29 @@ python3 scripts/offsec_agent_loop.py \
 
 ### DeepSeek-R1 — Continue only (skip `offsec_agent_loop.py`)
 
-**DeepSeek-R1** on Ollama is **not** wired up for **`scripts/offsec_agent_loop.py`**: it does **not** dependably emit **`tool_calls`** / structured tools on **`/api/chat`**, so the loop cannot run **`list_files`**, **`run_terminal_command`**, etc. Use **Continue** with **`roles: [chat]`** only (see §6).
+**DeepSeek-R1** on Ollama is **not** wired up for **`scripts/offsec_agent_loop.py`**: it does **not** dependably emit **`tool_calls`** / structured tools on **`/api/chat`**, so the loop cannot run **`list_files`**, **`run_terminal_command`**, etc. Use **Continue** with **`roles: [chat]`** only (see [§6](#6-continue-vs-code-with-cloud-run-ollama-and-vllm)).
 
 For executed tools locally, proxy **`qwen3-8b`**, **`nu11-redteamlite-ollama`**, or **`deephat-vllm-7b-prebaked`** instead — sections above.
 
 ### Cursor vs Continue
 
-**Continue** can use **Cloud Run Ollama** directly (**`provider: ollama`**, `apiBase` **without** `/v1`) for chat and tool-capable flows when the model emits proper **`tool_calls`**.
+**Continue** can use **Cloud Run**-proxied **Ollama** (**`provider: ollama`**, `apiBase` **without** `/v1`) for chat and tool-capable flows when the model emits proper **`tool_calls`**. For **vLLM**, use **`provider: openai`** and an **`apiBase`** ending in **`/v1`** (see **DeepHat** in [§6](#6-continue-vs-code-with-cloud-run-ollama-and-vllm)).
 
 **Cursor** custom OpenAI-compatible URLs may work for **some** chat/completion flows; **agent-style features** are often routed via **Cursor’s own backend**, so for a **fully local model→tool loop** prefer **Continue**, **`offsec_agent_loop.py`**, or **`ollama launch`**-style integrations—not “Cursor Agent pointed only at Ollama.”
 
 ---
 
-## 6) Continue (VS Code) with Cloud Run Ollama
+## 6) Continue (VS Code) with Cloud Run (Ollama and vLLM)
 
-### Start proxy (required while using Continue)
+### Start proxy (Ollama on `11434`)
+
+Use **`11434`** for **Ollama**-backed Cloud Run services:
 
 ```bash
 gcloud run services proxy YOUR_CLOUD_RUN_SERVICE --region europe-west1 --port 11434
 ```
+
+For **vLLM** (e.g. DeepHat), proxy on **`8080`** instead — see [§4](#4-vllm-hugging-face-models-openai-compatible-api) and **DeepHat** in [§5](#5-reference-cloud-run-models-tooling-paths).
 
 ### Example `~/.continue/config.yaml`
 
@@ -532,6 +538,8 @@ Optional:
 PROJECT_ID="your-project-id" REGION="europe-west1" PORT="11434" ./proxy.sh qwen
 ```
 
+**Extra:** [`docs/inference-formats-and-runtimes.md`](docs/inference-formats-and-runtimes.md) — short notes on inference formats and runtimes.
+
 ---
 
 ## 8) Optional: OpenWebUI bridge
@@ -554,7 +562,9 @@ OpenWebUI Ollama URL:
 http://172.17.0.1:11434
 ```
 
-## L4 sizing quick guide
+---
+
+## 9) L4 sizing quick guide
 
 NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VRAM.
 
@@ -563,7 +573,7 @@ NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VR
 - Large FP16 weights + long context can stall or OOM.
 - If `/api/tags` works but generation hangs, suspect VRAM/load before blaming the client.
 
-## Common errors
+## 10) Common errors
 
 1. **`403` / `401` on Cloud Run** — missing/expired identity token or wrong account. Run `gcloud auth login` and use `gcloud auth print-identity-token`.
 
