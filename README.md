@@ -157,13 +157,13 @@ PROJECT_ID="your-project-id" \
 REGION="europe-west1" \
 SERVICE="tongyi-deepresearch-iq2s" \
 OLLAMA_MODEL_NAME="tongyi-deepresearch-iq2s" \
-MIN_INSTANCES="1" \
 ./deploy-tongyi.sh
 ```
 
 - **Build time:** ~20–40 min (8.7 GB download in Cloud Build; curl may look idle after a ~1 KB redirect line — normal).
 - **API model name:** use **`tongyi-deepresearch-iq2s`** (not the long HF path) — check with `/api/tags`.
 - **Proxy:** `PROJECT_ID="your-project-id" ./proxy.sh tongyi`
+- **Cost:** default **`MIN_INSTANCES=0`** (scale to zero). Only set **`MIN_INSTANCES=1`** for a benchmark session — an L4 GPU idling 24/7 is expensive.
 - **Benchmark** (with proxy on `11434`):  
   `uv run run_benchmark.py run ollama -m "tongyi-deepresearch-iq2s" --config configs/cloudrun_ollama.yaml`
 
