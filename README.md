@@ -20,6 +20,7 @@ Minimal commands for deploying **Ollama** and **vLLM** on **Google Cloud Run**, 
 
 - [One-time setup](#0-one-time-setup-per-project-region)
 - [Deploy Ollama](#1-deploy-ollama)
+- [Deploy Hugging Face GGUF (Tongyi / manual bake)](#11-deploy-hugging-face-gguf-tongyi--manual-bake)
 - [Test & destroy](#2-test-destroy)
 - [Tools: docs, “tool compatible” labels, and workarounds](#3-tools-docs-tool-compatible-labels-and-workarounds)
 - [vLLM (HF models, OpenAI-style API)](#4-vllm-hugging-face-models-openai-compatible-api)
@@ -71,6 +72,13 @@ gcloud auth configure-docker europe-west1-docker.pkg.dev
 ## 1) Deploy Ollama
 
 `MODEL_NAME` is required. It is passed as a Docker build arg so the pulled model and smoke checks stay aligned.
+
+**Cloud Run GPU defaults** (in `deploy.sh` since 2026-06):
+
+- **`--no-gpu-zonal-redundancy`** — avoids the interactive GPU quota prompt on L4.
+- **`OLLAMA_LLM_LIBRARY=cuda_v13`** — Cloud Run L4 ships driver **535 / CUDA 12.2**; without this, Ollama **0.30.x** often picks **`cuda_v12`** and fails at first inference with **`device kernel image is invalid`**.
+
+Override env vars: `SET_ENV_VARS="OLLAMA_LLM_LIBRARY=cuda_v13,OLLAMA_KEEP_ALIVE=-1" ./deploy.sh`
 
 ```bash
 MODEL_NAME="qwen3:8b" SERVICE="qwen3-8b" ./deploy.sh
@@ -129,6 +137,46 @@ Use the exact **`name`** from **`/api/tags`** as `"model"` / Continue `model` (e
 For **Continue**, start with a **moderate `contextLength`** (e.g. **8192**). The hub reports **128K**, but long contexts increase **VRAM** pressure — raise only after smoke tests.
 
 **Do not use `scripts/offsec_agent_loop.py` with DeepSeek-R1** in this setup: the tag does **not** reliably expose **Ollama structured tools** / **`tool_calls`**, so the loop cannot drive workspace tools. Use **Continue (chat only)** for reasoning; switch proxy to **Qwen**, **RedTeamLite**, or **DeepHat** when you need the Python agent loop.
+
+### 1.1) Deploy Hugging Face GGUF (Tongyi / manual bake)
+
+Some Hugging Face repos **cannot** use `ollama pull hf.co/...` in Cloud Build (e.g. **`Repository is not GGUF or is not compatible with llama.cpp`** for MoE repos). For those, bake the **`.gguf`** in the image and **`ollama create`** a short local name.
+
+**Example:** [Tongyi DeepResearch 30B-A3B IQ2_S](https://huggingface.co/bartowski/Alibaba-NLP_Tongyi-DeepResearch-30B-A3B-GGUF) (~8.7 GB, fits 1× L4).
+
+| File | Role |
+|------|------|
+| `Dockerfile.tongyi` | Downloads GGUF in Cloud Build, runs `ollama create` |
+| `Modelfile.tongyi` | Points at the baked file (`num_ctx 8192`) |
+| `deploy-tongyi.sh` | Build + deploy + smoke test (same L4 flags as `deploy.sh`) |
+
+```bash
+chmod +x ./deploy-tongyi.sh
+
+PROJECT_ID="your-project-id" \
+REGION="europe-west1" \
+SERVICE="tongyi-deepresearch-iq2s" \
+OLLAMA_MODEL_NAME="tongyi-deepresearch-iq2s" \
+MIN_INSTANCES="1" \
+./deploy-tongyi.sh
+```
+
+- **Build time:** ~20–40 min (8.7 GB download in Cloud Build; curl may look idle after a ~1 KB redirect line — normal).
+- **API model name:** use **`tongyi-deepresearch-iq2s`** (not the long HF path) — check with `/api/tags`.
+- **Proxy:** `PROJECT_ID="your-project-id" ./proxy.sh tongyi`
+- **Benchmark** (with proxy on `11434`):  
+  `uv run run_benchmark.py run ollama -m "tongyi-deepresearch-iq2s" --config configs/cloudrun_ollama.yaml`
+
+Optional overrides:
+
+```bash
+GGUF_FILE="Alibaba-NLP_Tongyi-DeepResearch-30B-A3B-IQ4_XS.gguf" \
+GGUF_URL="https://huggingface.co/bartowski/Alibaba-NLP_Tongyi-DeepResearch-30B-A3B-GGUF/resolve/main/Alibaba-NLP_Tongyi-DeepResearch-30B-A3B-IQ4_XS.gguf" \
+OLLAMA_MODEL_NAME="tongyi-deepresearch-iq4xs" \
+./deploy-tongyi.sh
+```
+
+If **`ollama create`** fails at build time (unknown architecture), use **vLLM** with the upstream HF model `Alibaba-NLP/Tongyi-DeepResearch-30B-A3B` instead ([§4](#4-vllm-hugging-face-models-openai-compatible-api)).
 
 ## 2) Test & destroy
 
@@ -350,9 +398,10 @@ Typical layout (pick **one** Ollama-backed tab on **`11434`** at a time):
 | `qwen3-8b` | Ollama | `qwen3:8b` | **Continue** — native **`tool_use`** (chat + edit + agent-style tools when Continue drives them). Proxy **`11434`**. |
 | `deepseek-r1-8b` | Ollama | `deepseek-r1:8b` | **Continue — chat only** ([library](https://ollama.com/library/deepseek-r1)). **Not** for **`offsec_agent_loop.py`** (no reliable tool support here). Proxy **`11434`** (`./proxy.sh deepseek`). |
 | `nu11-redteamlite-ollama` | Ollama | `f0rc3ps/nu11secur1tyAIRedTeamLite` | **`scripts/offsec_agent_loop.py --backend ollama`** — parses JSON-in-text / native tools, runs local tools. Optional **Continue chat-only** (no `tool_use`). Proxy **`11434`**. |
+| `tongyi-deepresearch-iq2s` | Ollama | `tongyi-deepresearch-iq2s` | **Chat / benchmarks** — manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)). Proxy **`11434`** (`./proxy.sh tongyi`). Requires **`OLLAMA_LLM_LIBRARY=cuda_v13`** on L4. |
 | `deephat-vllm-7b-prebaked` | vLLM | `DeepHat/DeepHat-V1-7B` | **`scripts/offsec_agent_loop.py --backend openai`** — OpenAI-compatible **`/v1`**. Proxy **`8080`**. Continue can use **`provider: openai`** + **`apiBase: …/v1`** for **chat** if you want; agent UX varies by Continue version. |
 
-**Ports:** only **one** process should own **`127.0.0.1:11434`** at a time (pick **one** among **Qwen**, **DeepSeek-R1**, **RedTeamLite**). DeepHat uses **`8080`** so it can run alongside an Ollama proxy.
+**Ports:** only **one** process should own **`127.0.0.1:11434`** at a time (pick **one** among **Qwen**, **DeepSeek-R1**, **RedTeamLite**, **Tongyi**). DeepHat uses **`8080`** so it can run alongside an Ollama proxy.
 
 ### Python agent loop — DeepHat (`MAX_MODEL_LEN=8192`)
 
@@ -521,8 +570,9 @@ Use the exact `name` from `/api/tags` in Continue’s `model` field. For **`prov
 | Script | Purpose |
 |--------|---------|
 | `scripts/offsec_streamlit_app.py` | Optional **Streamlit** front-end for the Python agent loop (see [Streamlit UI](#streamlit-ui-optional)); `pip install -r requirements-streamlit.txt` then `streamlit run scripts/offsec_streamlit_app.py`. |
-| `./proxy.sh` | `gcloud run services proxy` helper: **`qwen`** → `qwen3-8b`, **`deepseek`** → `deepseek-r1-8b`, **`redteam`** / **`nu11`** → `nu11-redteamlite-ollama`, **`deephat`** → `deephat-vllm-7b-prebaked` (local port **8080** by default), **`list`**, or pass any Cloud Run **service name**. Override port with **`PORT=…`**. |
-| `./unstick.sh` | Same shortcuts as **`proxy.sh`** (**`qwen`**, **`deepseek`**, **`redteam`** / **`nu11`**, **`deephat`**, or raw service name) — bumps **`UNSTICK_NONCE`** to roll the revision |
+| `./deploy-tongyi.sh` | Build **`Dockerfile.tongyi`** (manual HF GGUF bake) and deploy Tongyi DeepResearch (or override **`GGUF_URL`** / **`OLLAMA_MODEL_NAME`**). |
+| `./proxy.sh` | `gcloud run services proxy` helper: **`qwen`** → `qwen3-8b`, **`deepseek`** → `deepseek-r1-8b`, **`redteam`** / **`nu11`** → `nu11-redteamlite-ollama`, **`tongyi`** → `tongyi-deepresearch-iq2s`, **`deephat`** → `deephat-vllm-7b-prebaked` (local port **8080** by default), **`list`**, or pass any Cloud Run **service name**. Override port with **`PORT=…`**. |
+| `./unstick.sh` | Same shortcuts as **`proxy.sh`** (**`qwen`**, **`deepseek`**, **`redteam`** / **`nu11`**, **`tongyi`**, **`deephat`**, or raw service name) — bumps **`UNSTICK_NONCE`** to roll the revision |
 
 Examples:
 
@@ -569,6 +619,7 @@ http://172.17.0.1:11434
 NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VRAM.
 
 - 7B/8B quantized (Q4/Q5): usually comfortable on 1× L4.
+- MoE ~8–10 GB IQ quants (e.g. Tongyi IQ2_S): fits 1× L4 with moderate context.
 - 13B: often workable; context and concurrency matter.
 - Large FP16 weights + long context can stall or OOM.
 - If `/api/tags` works but generation hangs, suspect VRAM/load before blaming the client.
@@ -577,16 +628,24 @@ NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VR
 
 1. **`403` / `401` on Cloud Run** — missing/expired identity token or wrong account. Run `gcloud auth login` and use `gcloud auth print-identity-token`.
 
-2. **GPU quota** — request L4 quota in the region you deploy, or use a region where quota exists.
+2. **GPU quota / zonal redundancy** — `You do not have quota for using GPUs with zonal redundancy`. Answer **`Y`** at the prompt, or deploy with **`--no-gpu-zonal-redundancy`** (already default in `deploy.sh` / `deploy-tongyi.sh`).
 
-3. **Wrong project/region** — `gcloud config get-value project` and `run/region`.
+3. **`CUDA error: device kernel image is invalid`** on L4 — Ollama picked **`cuda_v12`** against Cloud Run driver **535**. Fix: **`gcloud run services update SERVICE --set-env-vars OLLAMA_LLM_LIBRARY=cuda_v13`** (default in `deploy.sh`).
 
-4. **OpenWebUI cannot reach Ollama** — keep `proxy` + `socat` running; URL must match (`http://172.17.0.1:11434` in the example above).
+4. **`Repository is not GGUF or is not compatible with llama.cpp`** during `ollama pull hf.co/...` in Cloud Build — use manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)) or **vLLM**.
 
-5. **Continue cannot find models** — proxy running? `curl -s http://127.0.0.1:11434/api/tags` — use exact `model` string; `provider: ollama` uses `http://127.0.0.1:11434` without `/v1`.
+5. **Cloud Build looks stuck at curl ~1080 bytes** — that line is the HF redirect; the **~8.7 GB** download continues with little log output for 15–40 min.
 
-6. **`model not found` from Ollama** — pull locally (`ollama pull <name>`) or ensure Cloud Run image contains that tag; match `/api/tags` names exactly.
+6. **Empty `gcloud run services logs tail`** — build logs live in **Cloud Build**, not Cloud Run; runtime logs stay quiet until the revision is **Ready** and something hits **`/api/generate`**.
 
-7. **vLLM HTTP 400 — maximum context length** — input (history + tools JSON + tool definitions) plus **`max_tokens`** exceeds **`MAX_MODEL_LEN`**. Fix: **`gcloud run services update … MAX_MODEL_LEN=…`**, set matching **`--context-limit`** on **`offsec_agent_loop.py`**, lower **`--max-tokens`**, or rely on **`--tool-list-cap`** / **`--tool-chars-cap`** to shrink tool messages.
+7. **Wrong project/region** — `gcloud config get-value project` and `run/region`.
 
-8. **DeepSeek-R1 + agent loop** — **`offsec_agent_loop.py`** expects **`tool_calls`** (or parseable JSON-in-text patterns). DeepSeek-R1 on Ollama **does not** support that workflow reliably here → **Continue chat only**, or use **Qwen** / **RedTeamLite** / **DeepHat** for tooling.
+8. **OpenWebUI cannot reach Ollama** — keep `proxy` + `socat` running; URL must match (`http://172.17.0.1:11434` in the example above).
+
+9. **Continue cannot find models** — proxy running? `curl -s http://127.0.0.1:11434/api/tags` — use exact `model` string; `provider: ollama` uses `http://127.0.0.1:11434` without `/v1`.
+
+10. **`model not found` from Ollama** — pull locally (`ollama pull <name>`) or ensure Cloud Run image contains that tag; match `/api/tags` names exactly.
+
+11. **vLLM HTTP 400 — maximum context length** — input (history + tools JSON + tool definitions) plus **`max_tokens`** exceeds **`MAX_MODEL_LEN`**. Fix: **`gcloud run services update … MAX_MODEL_LEN=…`**, set matching **`--context-limit`** on **`offsec_agent_loop.py`**, lower **`--max-tokens`**, or rely on **`--tool-list-cap`** / **`--tool-chars-cap`** to shrink tool messages.
+
+12. **DeepSeek-R1 + agent loop** — **`offsec_agent_loop.py`** expects **`tool_calls`** (or parseable JSON-in-text patterns). DeepSeek-R1 on Ollama **does not** support that workflow reliably here → **Continue chat only**, or use **Qwen** / **RedTeamLite** / **DeepHat** for tooling.
