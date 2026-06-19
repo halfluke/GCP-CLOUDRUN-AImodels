@@ -710,3 +710,43 @@ NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VR
 11. **vLLM HTTP 400 — maximum context length** — input (history + tools JSON + tool definitions) plus **`max_tokens`** exceeds **`MAX_MODEL_LEN`**. Fix: **`gcloud run services update … MAX_MODEL_LEN=…`**, set matching **`--context-limit`** on **`offsec_agent_loop.py`**, lower **`--max-tokens`**, or rely on **`--tool-list-cap`** / **`--tool-chars-cap`** to shrink tool messages.
 
 12. **DeepSeek-R1 + agent loop** — **`offsec_agent_loop.py`** expects **`tool_calls`** (or parseable JSON-in-text patterns). DeepSeek-R1 on Ollama **does not** support that workflow reliably here → **Continue chat only**, or use **Qwen** / **DeepHat** for tooling.
+
+---
+
+## 11) Checking whether services are scaled to zero
+
+Use the Cloud Monitoring REST API — it queries the control plane only and does **not** wake up any service.
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://monitoring.googleapis.com/v3/projects/YOUR_PROJECT_ID/timeSeries?\
+filter=metric.type%3D%22run.googleapis.com%2Fcontainer%2Finstance_count%22\
+&interval.startTime=$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)\
+&interval.endTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+series = data.get('timeSeries', [])
+if not series:
+    print('All services at 0 instances (no data in window)')
+else:
+    for ts in series:
+        svc = ts['resource']['labels'].get('service_name', '?')
+        state = ts['metric']['labels'].get('state', '?')
+        for pt in ts.get('points', []):
+            t = pt['interval']['endTime']
+            val = pt['value'].get('int64Value', '0')
+            print(f'{t}  {svc} [{state}]: {val}')
+"
+```
+
+**How to read the output:**
+
+- **No output** — all services have been at 0 instances for the full 5-minute window.
+- **`[idle]: 1`** — one instance is warm and waiting (between requests). It will scale to 0 shortly after the idle timeout.
+- **`[active]: 1`** — one instance is currently handling a request.
+
+Both `idle` and `active` series are emitted for the same service at the same minute bucket, which is why the same timestamp can appear twice with different counts. Cloud Run stops emitting the metric entirely when a service reaches 0, so absence of data confirms it is fully scaled down.
+
+> **Note:** there is roughly a **60–90 second lag** between a scaling event and the metric appearing. If you just sent a request, wait ~2 minutes before checking.
