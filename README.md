@@ -136,7 +136,7 @@ Use the exact **`name`** from **`/api/tags`** as `"model"` / Continue `model` (e
 
 For **Continue**, start with a **moderate `contextLength`** (e.g. **8192**). The hub reports **128K**, but long contexts increase **VRAM** pressure — raise only after smoke tests.
 
-**Do not use `scripts/offsec_agent_loop.py` with DeepSeek-R1** in this setup: the tag does **not** reliably expose **Ollama structured tools** / **`tool_calls`**, so the loop cannot drive workspace tools. Use **Continue (chat only)** for reasoning; switch proxy to **Qwen**, **RedTeamLite**, or **DeepHat** when you need the Python agent loop.
+**Do not use `scripts/offsec_agent_loop.py` with DeepSeek-R1** in this setup: the tag does **not** reliably expose **Ollama structured tools** / **`tool_calls`**, so the loop cannot drive workspace tools. Use **Continue (chat only)** for reasoning; switch proxy to **Qwen** or **DeepHat** when you need the Python agent loop.
 
 ### 1.1) Deploy Hugging Face GGUF (Tongyi / manual bake)
 
@@ -397,11 +397,10 @@ Typical layout (pick **one** Ollama-backed tab on **`11434`** at a time):
 |-------------------|---------|----------|-------------------|
 | `qwen3-8b` | Ollama | `qwen3:8b` | **Continue** — native **`tool_use`** (chat + edit + agent-style tools when Continue drives them). Proxy **`11434`**. |
 | `deepseek-r1-8b` | Ollama | `deepseek-r1:8b` | **Continue — chat only** ([library](https://ollama.com/library/deepseek-r1)). **Not** for **`offsec_agent_loop.py`** (no reliable tool support here). Proxy **`11434`** (`./proxy.sh deepseek`). |
-| `nu11-redteamlite-ollama` | Ollama | `f0rc3ps/nu11secur1tyAIRedTeamLite` | **`scripts/offsec_agent_loop.py --backend ollama`** — parses JSON-in-text / native tools, runs local tools. Optional **Continue chat-only** (no `tool_use`). Proxy **`11434`**. |
 | `tongyi-deepresearch-iq2s` | Ollama | `tongyi-deepresearch-iq2s` | **Chat / benchmarks** — manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)). Proxy **`11434`** (`./proxy.sh tongyi`). Requires **`OLLAMA_LLM_LIBRARY=cuda_v13`** on L4. |
 | `deephat-vllm-7b-prebaked` | vLLM | `DeepHat/DeepHat-V1-7B` | **`scripts/offsec_agent_loop.py --backend openai`** — OpenAI-compatible **`/v1`**. Proxy **`8080`**. Continue can use **`provider: openai`** + **`apiBase: …/v1`** for **chat** if you want; agent UX varies by Continue version. |
 
-**Ports:** only **one** process should own **`127.0.0.1:11434`** at a time (pick **one** among **Qwen**, **DeepSeek-R1**, **RedTeamLite**, **Tongyi**). DeepHat uses **`8080`** so it can run alongside an Ollama proxy.
+**Ports:** only **one** process should own **`127.0.0.1:11434`** at a time (pick **one** among **Qwen**, **DeepSeek-R1**, **Tongyi**). DeepHat uses **`8080`** so it can run alongside an Ollama proxy.
 
 ### Python agent loop — DeepHat (`MAX_MODEL_LEN=8192`)
 
@@ -433,30 +432,11 @@ python3 scripts/offsec_agent_loop.py \
 
 Use **`/exit`** or **`/quit`** to leave interactive mode. Tune **`--tool-list-cap`** / **`--tool-chars-cap`** after huge directory listings.
 
-### Python agent loop — RedTeamLite (Ollama on Cloud Run)
-
-```bash
-gcloud run services proxy nu11-redteamlite-ollama \
-  --region europe-west1 \
-  --project your-project-id \
-  --port 11434
-
-python3 scripts/offsec_agent_loop.py \
-  --interactive \
-  --backend ollama \
-  --base-url "http://127.0.0.1:11434" \
-  --model "f0rc3ps/nu11secur1tyAIRedTeamLite" \
-  --base-dir "/path/to/your/workspace" \
-  --max-tokens 512 \
-  --temperature 0.3 \
-  --allow-shell
-```
-
 ### DeepSeek-R1 — Continue only (skip `offsec_agent_loop.py`)
 
 **DeepSeek-R1** on Ollama is **not** wired up for **`scripts/offsec_agent_loop.py`**: it does **not** dependably emit **`tool_calls`** / structured tools on **`/api/chat`**, so the loop cannot run **`list_files`**, **`run_terminal_command`**, etc. Use **Continue** with **`roles: [chat]`** only (see [§6](#6-continue-vs-code-with-cloud-run-ollama-and-vllm)).
 
-For executed tools locally, proxy **`qwen3-8b`**, **`nu11-redteamlite-ollama`**, or **`deephat-vllm-7b-prebaked`** instead — sections above.
+For executed tools locally, proxy **`qwen3-8b`** or **`deephat-vllm-7b-prebaked`** instead — sections above.
 
 ### Cursor vs Continue
 
@@ -468,7 +448,74 @@ For executed tools locally, proxy **`qwen3-8b`**, **`nu11-redteamlite-ollama`**,
 
 ## 6) Continue (VS Code) with Cloud Run (Ollama and vLLM)
 
-### Start proxy (Ollama on `11434`)
+Two connection approaches: **local proxy** (simpler, but the tunnel can die after ~1 hour) or **direct HTTPS with a bearer token** (stateless, no tunnel process needed).
+
+### Option A — Direct HTTPS with bearer token (recommended)
+
+No proxy process needed. Continue sends the Cloud Run identity token directly in the `Authorization` header.
+
+**Step 1 — seed the token** (run once per session, then again every ~55 minutes):
+
+```bash
+TOKEN=$(gcloud auth print-identity-token)
+grep -v "^CLOUDRUN_TOKEN=" ~/.continue/.env > /tmp/.c_env_tmp 2>/dev/null || true
+echo "CLOUDRUN_TOKEN=$TOKEN" >> /tmp/.c_env_tmp
+mv /tmp/.c_env_tmp ~/.continue/.env
+```
+
+Or save this as a script (`~/.continue/refresh_token.sh`) and add an alias:
+
+```bash
+alias gcr-token='~/.continue/refresh_token.sh'
+```
+
+**Step 2 — `~/.continue/config.yaml`** (use `${{ secrets.CLOUDRUN_TOKEN }}` — resolved from `~/.continue/.env`):
+
+```yaml
+  - name: Qwen3-myGCP
+    provider: ollama
+    model: qwen3:8b
+    apiBase: https://YOUR-OLLAMA-SERVICE-HASH.a.run.app
+    requestOptions:
+      headers:
+        Authorization: Bearer ${{ secrets.CLOUDRUN_TOKEN }}
+    roles:
+      - chat
+      - edit
+      - apply
+      - autocomplete
+    capabilities:
+      - tool_use
+
+  - name: DeepSeekR1-myGCP
+    provider: ollama
+    model: deepseek-r1:8b
+    apiBase: https://YOUR-DEEPSEEK-SERVICE-HASH.a.run.app
+    requestOptions:
+      headers:
+        Authorization: Bearer ${{ secrets.CLOUDRUN_TOKEN }}
+    roles:
+      - chat
+
+  - name: DeepHat-myGCP
+    provider: openai
+    model: DeepHat/DeepHat-V1-7B
+    apiBase: https://YOUR-VLLM-SERVICE-HASH.a.run.app/v1
+    apiKey: not-required
+    requestOptions:
+      headers:
+        Authorization: Bearer ${{ secrets.CLOUDRUN_TOKEN }}
+    roles:
+      - chat
+```
+
+**Step 3** — after refreshing the token, do **Continue: Reload Config** in VS Code so the extension re-reads `~/.continue/.env`.
+
+> **Token lifetime:** GCP identity tokens expire after ~1 hour. The proxy approach has the same limitation (gcloud silently stops forwarding after expiry). With direct auth you at least get a clear auth error rather than a hanging connection.
+
+---
+
+### Option B — Local proxy (Ollama on `11434`)
 
 Use **`11434`** for **Ollama**-backed Cloud Run services:
 
@@ -478,7 +525,7 @@ gcloud run services proxy YOUR_CLOUD_RUN_SERVICE --region europe-west1 --port 11
 
 For **vLLM** (e.g. DeepHat), proxy on **`8080`** instead — see [§4](#4-vllm-hugging-face-models-openai-compatible-api) and **DeepHat** in [§5](#5-reference-cloud-run-models-tooling-paths).
 
-### Example `~/.continue/config.yaml`
+### Example `~/.continue/config.yaml` (proxy variant)
 
 Reload after edits: VS Code command palette → **Continue: Reload Config**.
 
@@ -496,21 +543,6 @@ Reload after edits: VS Code command palette → **Continue: Reload Config**.
       - autocomplete
     capabilities:
       - tool_use
-```
-
-**RedTeamLite — chat only** (swap proxy to `nu11-redteamlite-ollama`; use **`offsec_agent_loop.py`** if you need executed tools):
-
-```yaml
-  - name: RedTeamLite-myGCP
-    provider: ollama
-    model: f0rc3ps/nu11secur1tyAIRedTeamLite
-    apiBase: http://127.0.0.1:11434
-    roles:
-      - chat
-    contextLength: 8192
-    defaultCompletionOptions:
-      temperature: 0.3
-      maxTokens: 1024
 ```
 
 **DeepSeek-R1 — chat only** (swap proxy to **`deepseek-r1-8b`** or **`./proxy.sh deepseek`**; **no** `offsec_agent_loop.py` — this tag does not support tools reliably):
@@ -546,7 +578,7 @@ Reload after edits: VS Code command palette → **Continue: Reload Config**.
 
 ### One proxy port = one Cloud Run service
 
-**`11434`** → whichever **Ollama** service you proxied last (**Qwen**, **DeepSeek-R1**, **RedTeamLite**). **`8080`** → **DeepHat vLLM** (can run **at the same time** as **`11434`**).
+**`11434`** → whichever **Ollama** service you proxied last (**Qwen**, **DeepSeek-R1**, **Tongyi**). **`8080`** → **DeepHat vLLM** (can run **at the same time** as **`11434`**).
 
 ### Capability sanity check
 
@@ -554,7 +586,6 @@ Reload after edits: VS Code command palette → **Continue: Reload Config**.
 |---------------|---------|-------------------------|
 | `Qwen3-myGCP` | Ollama `qwen3:8b` | Native **`tool_use`** |
 | `DeepSeekR1-myGCP` | Ollama `deepseek-r1:8b` | **Chat only** — **do not** pair with **`offsec_agent_loop.py`** (no dependable tools on Ollama for this tag) |
-| `RedTeamLite-myGCP` | Ollama RedTeam tag | **Chat only** (no `tool_use` in config) |
 | `DeepHat-myGCP` | OpenAI-compat `/v1` | **Chat-oriented**; flaky tool UX → use **agent loop** |
 
 ```bash
@@ -571,8 +602,8 @@ Use the exact `name` from `/api/tags` in Continue’s `model` field. For **`prov
 |--------|---------|
 | `scripts/offsec_streamlit_app.py` | Optional **Streamlit** front-end for the Python agent loop (see [Streamlit UI](#streamlit-ui-optional)); `pip install -r requirements-streamlit.txt` then `streamlit run scripts/offsec_streamlit_app.py`. |
 | `./deploy-tongyi.sh` | Build **`Dockerfile.tongyi`** (manual HF GGUF bake) and deploy Tongyi DeepResearch (or override **`GGUF_URL`** / **`OLLAMA_MODEL_NAME`**). |
-| `./proxy.sh` | `gcloud run services proxy` helper: **`qwen`** → `qwen3-8b`, **`deepseek`** → `deepseek-r1-8b`, **`redteam`** / **`nu11`** → `nu11-redteamlite-ollama`, **`tongyi`** → `tongyi-deepresearch-iq2s`, **`deephat`** → `deephat-vllm-7b-prebaked` (local port **8080** by default), **`list`**, or pass any Cloud Run **service name**. Override port with **`PORT=…`**. |
-| `./unstick.sh` | Same shortcuts as **`proxy.sh`** (**`qwen`**, **`deepseek`**, **`redteam`** / **`nu11`**, **`tongyi`**, **`deephat`**, or raw service name) — bumps **`UNSTICK_NONCE`** to roll the revision |
+| `./proxy.sh` | `gcloud run services proxy` helper: **`qwen`** → `qwen3-8b`, **`deepseek`** → `deepseek-r1-8b`, **`tongyi`** → `tongyi-deepresearch-iq2s`, **`deephat`** → `deephat-vllm-7b-prebaked` (local port **8080** by default), **`list`**, or pass any Cloud Run **service name**. Override port with **`PORT=…`**. |
+| `./unstick.sh` | Same shortcuts as **`proxy.sh`** (**`qwen`**, **`deepseek`**, **`tongyi`**, **`deephat`**, or raw service name) — bumps **`UNSTICK_NONCE`** to roll the revision |
 
 Examples:
 
@@ -648,4 +679,4 @@ NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VR
 
 11. **vLLM HTTP 400 — maximum context length** — input (history + tools JSON + tool definitions) plus **`max_tokens`** exceeds **`MAX_MODEL_LEN`**. Fix: **`gcloud run services update … MAX_MODEL_LEN=…`**, set matching **`--context-limit`** on **`offsec_agent_loop.py`**, lower **`--max-tokens`**, or rely on **`--tool-list-cap`** / **`--tool-chars-cap`** to shrink tool messages.
 
-12. **DeepSeek-R1 + agent loop** — **`offsec_agent_loop.py`** expects **`tool_calls`** (or parseable JSON-in-text patterns). DeepSeek-R1 on Ollama **does not** support that workflow reliably here → **Continue chat only**, or use **Qwen** / **RedTeamLite** / **DeepHat** for tooling.
+12. **DeepSeek-R1 + agent loop** — **`offsec_agent_loop.py`** expects **`tool_calls`** (or parseable JSON-in-text patterns). DeepSeek-R1 on Ollama **does not** support that workflow reliably here → **Continue chat only**, or use **Qwen** / **DeepHat** for tooling.
