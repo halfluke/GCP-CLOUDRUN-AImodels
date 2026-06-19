@@ -463,9 +463,39 @@ echo "CLOUDRUN_TOKEN=$TOKEN" >> /tmp/.c_env_tmp
 mv /tmp/.c_env_tmp ~/.continue/.env
 ```
 
-Or save this as a script (`~/.continue/refresh_token.sh`) and add an alias:
+Or save the following as `~/.continue/refresh_token.sh` and add an alias so you never have to remember the path:
 
 ```bash
+#!/usr/bin/env bash
+# Refresh GCP identity token for Continue extension Cloud Run models.
+# Run once before opening VS Code, then again after ~55 minutes.
+#
+# Usage:
+#   ~/.continue/refresh_token.sh
+#   # or add to ~/.zshrc / ~/.bashrc:
+#   alias gcr-token='~/.continue/refresh_token.sh'
+
+set -euo pipefail
+
+ENV_FILE="$HOME/.continue/.env"
+TOKEN=$(gcloud auth print-identity-token)
+
+# Preserve existing entries, replace or add CLOUDRUN_TOKEN
+if [[ -f "$ENV_FILE" ]]; then
+  grep -v "^CLOUDRUN_TOKEN=" "$ENV_FILE" > "${ENV_FILE}.tmp"
+else
+  touch "${ENV_FILE}.tmp"
+fi
+echo "CLOUDRUN_TOKEN=$TOKEN" >> "${ENV_FILE}.tmp"
+mv "${ENV_FILE}.tmp" "$ENV_FILE"
+
+EXPIRY=$(date -d '+55 minutes' '+%H:%M' 2>/dev/null || date -v+55M '+%H:%M')
+echo "Token refreshed. Reload Continue window before ~${EXPIRY}."
+```
+
+```bash
+chmod +x ~/.continue/refresh_token.sh
+# add to ~/.zshrc or ~/.bashrc:
 alias gcr-token='~/.continue/refresh_token.sh'
 ```
 
