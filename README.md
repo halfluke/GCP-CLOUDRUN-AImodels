@@ -21,6 +21,7 @@ Minimal commands for deploying **Ollama** and **vLLM** on **Google Cloud Run**, 
 - [One-time setup](#0-one-time-setup-per-project-region)
 - [Deploy Ollama](#1-deploy-ollama)
 - [Deploy Hugging Face GGUF (Tongyi / manual bake)](#11-deploy-hugging-face-gguf-tongyi--manual-bake)
+- [Deploy BugTrace Apex 26B Q4 (Ollama hf.co pull)](#12-deploy-bugtrace-apex-26b-q4-ollama-hfco-pull)
 - [Test & destroy](#2-test-destroy)
 - [Tools: docs, “tool compatible” labels, and workarounds](#3-tools-docs-tool-compatible-labels-and-workarounds)
 - [vLLM (HF models, OpenAI-style API)](#4-vllm-hugging-face-models-openai-compatible-api)
@@ -177,6 +178,78 @@ OLLAMA_MODEL_NAME="tongyi-deepresearch-iq4xs" \
 ```
 
 If **`ollama create`** fails at build time (unknown architecture), use **vLLM** with the upstream HF model `Alibaba-NLP/Tongyi-DeepResearch-30B-A3B` instead ([§4](#4-vllm-hugging-face-models-openai-compatible-api)).
+
+### 1.2) Deploy BugTrace Apex 26B Q4 (Ollama hf.co pull)
+
+[BugTraceAI-Apex-G4-26B-Q4](https://huggingface.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4) is a **26B** GGUF (~**14 GB** Q4) tuned for offensive-security / red-team reasoning. It ranks highly on the upstream **Red Team AI Benchmark v2** rubric when run with **`max_tokens=4096`**. On **1× L4 (24 GB VRAM)** it is **tight but workable** with Q4 quantization — expect slower cold starts and moderate context limits compared to 7B/8B models.
+
+Unlike Tongyi (manual GGUF download), this path uses **`ollama pull hf.co/...`** during **Cloud Build**, similar to a standard Ollama hub pull but authenticated against Hugging Face.
+
+| File | Role |
+|------|------|
+| `Dockerfile.bugtrace` | Runs `ollama pull` at build time with `HUGGING_FACE_HUB_TOKEN` |
+| `deploy-bugtrace.sh` | Cloud Build + deploy to Cloud Run (L4, `OLLAMA_LLM_LIBRARY=cuda_v13`) |
+
+**Deploy** (HF token required — pass via env, never commit):
+
+```bash
+chmod +x ./deploy-bugtrace.sh
+
+PROJECT_ID="your-project-id" \
+REGION="europe-west1" \
+SERVICE="bugtrace-apex-26b" \
+HUGGING_FACE_HUB_TOKEN="hf_..." \
+./deploy-bugtrace.sh
+```
+
+- **Build time:** ~25–40 min (14 GB model baked into the image).
+- **API model name:** use the full HF tag — **`hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest`** — confirm with `/api/tags`.
+- **Cold start:** first request after scale-to-zero may take **2–3 minutes**.
+- **Cost:** default **`MIN_INSTANCES=0`** (scale to zero). Set **`MIN_INSTANCES=1`** only during benchmark sessions.
+- **Proxy:** `PROJECT_ID="your-project-id" ./proxy.sh bugtrace` (Ollama on **`11434`**).
+- **Direct HTTPS test** (no proxy):
+
+```bash
+SERVICE="bugtrace-apex-26b"
+REGION="europe-west1"
+SERVICE_URL="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.url)')"
+
+curl -sS "${SERVICE_URL}/api/generate" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest", "prompt": "Say hi.", "stream": false}'
+```
+
+**Benchmark** (from [redteam-ai-benchmark `feature/cloudrun-v2`](https://github.com/halfluke/redteam-ai-benchmark/tree/feature/cloudrun-v2)):
+
+```bash
+cd ~/Downloads/redteam-ai-benchmark
+git checkout feature/cloudrun-v2
+
+# Optional: scripts/local_env.sh (gitignored) with BUGTRACE_ENDPOINT / BUGTRACE_MODEL
+export BUGTRACE_ENDPOINT="https://YOUR-BUGTRACE-SERVICE-HASH.a.run.app"
+export BUGTRACE_MODEL="hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest"
+
+./scripts/warmup_bugtrace.sh
+
+uv run run_benchmark.py run ollama \
+  -m "$BUGTRACE_MODEL" \
+  -e "$BUGTRACE_ENDPOINT" \
+  --config configs/cloudrun_ollama_bugtrace.yaml \
+  --profile standard
+```
+
+`configs/cloudrun_ollama_bugtrace.yaml` sets **`max_tokens: 4096`** to match the upstream leaderboard run. For prompt optimization (local Qwen on LAN), add **`--optimize-prompts`** and **`--optimizer-endpoint`** — see that repo’s README branch section.
+
+Optional overrides:
+
+```bash
+OLLAMA_MODEL="hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest" \
+MEMORY="32Gi" \
+MIN_INSTANCES="0" \
+BUILD_TIMEOUT="14400s" \
+./deploy-bugtrace.sh
+```
 
 ## 2) Test & destroy
 
@@ -398,9 +471,10 @@ Typical layout (pick **one** Ollama-backed tab on **`11434`** at a time):
 | `qwen3-8b` | Ollama | `qwen3:8b` | **Continue** — native **`tool_use`** (chat + edit + agent-style tools when Continue drives them). Proxy **`11434`**. |
 | `deepseek-r1-8b` | Ollama | `deepseek-r1:8b` | **Continue — chat only** ([library](https://ollama.com/library/deepseek-r1)). **Not** for **`offsec_agent_loop.py`** (no reliable tool support here). Proxy **`11434`** (`./proxy.sh deepseek`). |
 | `tongyi-deepresearch-iq2s` | Ollama | `tongyi-deepresearch-iq2s` | **Chat / benchmarks** — manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)). Proxy **`11434`** (`./proxy.sh tongyi`). Requires **`OLLAMA_LLM_LIBRARY=cuda_v13`** on L4. |
+| `bugtrace-apex-26b` | Ollama | `hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest` | **Benchmarks / red-team chat** — HF **`hf.co` pull** bake ([§1.2](#12-deploy-bugtrace-apex-26b-q4-ollama-hfco-pull)). Proxy **`11434`** (`./proxy.sh bugtrace`). **26B Q4 on L4 is tight** — use **`max_tokens=4096`** for fair v2 comparison. |
 | `deephat-vllm-7b-prebaked` | vLLM | `DeepHat/DeepHat-V1-7B` | **`scripts/offsec_agent_loop.py --backend openai`** — OpenAI-compatible **`/v1`**. Proxy **`8080`**. Continue can use **`provider: openai`** + **`apiBase: …/v1`** for **chat** if you want; agent UX varies by Continue version. |
 
-**Ports:** only **one** process should own **`127.0.0.1:11434`** at a time (pick **one** among **Qwen**, **DeepSeek-R1**, **Tongyi**). DeepHat uses **`8080`** so it can run alongside an Ollama proxy.
+**Ports:** only **one** process should own **`127.0.0.1:11434`** at a time (pick **one** among **Qwen**, **DeepSeek-R1**, **Tongyi**, **BugTrace**). DeepHat uses **`8080`** so it can run alongside an Ollama proxy.
 
 ### Python agent loop — DeepHat (`MAX_MODEL_LEN=8192`)
 
@@ -537,6 +611,20 @@ alias gcr-token='~/.continue/refresh_token.sh'
         Authorization: Bearer ${{ secrets.CLOUDRUN_TOKEN }}
     roles:
       - chat
+
+  - name: BugTrace-myGCP
+    provider: ollama
+    model: hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest
+    apiBase: https://YOUR-BUGTRACE-SERVICE-HASH.a.run.app
+    requestOptions:
+      headers:
+        Authorization: Bearer ${{ secrets.CLOUDRUN_TOKEN }}
+    roles:
+      - chat
+    contextLength: 8192
+    defaultCompletionOptions:
+      temperature: 0.2
+      maxTokens: 4096
 ```
 
 **Step 3** — after refreshing the token, do **Continue: Reload Config** in VS Code so the extension re-reads `~/.continue/.env`.
@@ -632,8 +720,9 @@ Use the exact `name` from `/api/tags` in Continue’s `model` field. For **`prov
 |--------|---------|
 | `scripts/offsec_streamlit_app.py` | Optional **Streamlit** front-end for the Python agent loop (see [Streamlit UI](#streamlit-ui-optional)); `pip install -r requirements-streamlit.txt` then `streamlit run scripts/offsec_streamlit_app.py`. |
 | `./deploy-tongyi.sh` | Build **`Dockerfile.tongyi`** (manual HF GGUF bake) and deploy Tongyi DeepResearch (or override **`GGUF_URL`** / **`OLLAMA_MODEL_NAME`**). |
-| `./proxy.sh` | `gcloud run services proxy` helper: **`qwen`** → `qwen3-8b`, **`deepseek`** → `deepseek-r1-8b`, **`tongyi`** → `tongyi-deepresearch-iq2s`, **`deephat`** → `deephat-vllm-7b-prebaked` (local port **8080** by default), **`list`**, or pass any Cloud Run **service name**. Override port with **`PORT=…`**. |
-| `./unstick.sh` | Same shortcuts as **`proxy.sh`** (**`qwen`**, **`deepseek`**, **`tongyi`**, **`deephat`**, or raw service name) — bumps **`UNSTICK_NONCE`** to roll the revision |
+| `./deploy-bugtrace.sh` | Build **`Dockerfile.bugtrace`** (Ollama **`hf.co` pull** at build time) and deploy BugTrace Apex 26B Q4. Requires **`HUGGING_FACE_HUB_TOKEN`**. |
+| `./proxy.sh` | `gcloud run services proxy` helper: **`qwen`** → `qwen3-8b`, **`deepseek`** → `deepseek-r1-8b`, **`tongyi`** → `tongyi-deepresearch-iq2s`, **`bugtrace`** → `bugtrace-apex-26b`, **`deephat`** → `deephat-vllm-7b-prebaked` (local port **8080** by default), **`list`**, or pass any Cloud Run **service name**. Override port with **`PORT=…`**. |
+| `./unstick.sh` | Same shortcuts as **`proxy.sh`** (**`qwen`**, **`deepseek`**, **`tongyi`**, **`bugtrace`**, **`deephat`**, or raw service name) — bumps **`UNSTICK_NONCE`** to roll the revision |
 
 Examples:
 
@@ -681,6 +770,7 @@ NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VR
 
 - 7B/8B quantized (Q4/Q5): usually comfortable on 1× L4.
 - MoE ~8–10 GB IQ quants (e.g. Tongyi IQ2_S): fits 1× L4 with moderate context.
+- **26B Q4** (e.g. BugTrace Apex G4): ~14 GB weights — fits 1× L4 but leaves little headroom; prefer moderate context and **`max_tokens`** caps.
 - 13B: often workable; context and concurrency matter.
 - Large FP16 weights + long context can stall or OOM.
 - If `/api/tags` works but generation hangs, suspect VRAM/load before blaming the client.

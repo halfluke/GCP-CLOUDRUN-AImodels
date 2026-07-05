@@ -1,0 +1,17 @@
+FROM ollama/ollama:latest
+
+ARG HF_TOKEN
+ARG OLLAMA_MODEL=hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Pull model from HuggingFace at build time so cold start doesn't need to download ~14 GB.
+RUN ollama serve & \
+    sleep 10 && \
+    HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}" ollama pull "${OLLAMA_MODEL}" && \
+    pkill ollama || true
+
+EXPOSE 11434
+ENTRYPOINT ["/usr/bin/ollama", "serve"]

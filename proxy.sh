@@ -6,7 +6,8 @@ set -euo pipefail
 # Usage:
 #   ./proxy.sh qwen
 #   ./proxy.sh deepseek
-#   ./proxy.sh redteam    # same as nu11
+#   ./proxy.sh tongyi
+#   ./proxy.sh bugtrace
 #   ./proxy.sh deephat    # vLLM — local port defaults to 8080
 #   ./proxy.sh <cloud-run-service-name>
 #   ./proxy.sh list
@@ -19,7 +20,7 @@ REGION="${REGION:-europe-west1}"
 TARGET="${1:-}"
 
 if [[ -z "${TARGET}" ]]; then
-  echo "Usage: $0 {qwen|deepseek|redteam|nu11|tongyi|deephat|<cloud-run-service>|list}"
+  echo "Usage: $0 {qwen|deepseek|redteam|nu11|tongyi|bugtrace|deephat|<cloud-run-service>|list}"
   exit 1
 fi
 
@@ -48,6 +49,10 @@ case "${TARGET}" in
   tongyi)
     SERVICE="tongyi-deepresearch-iq2s"
     MODEL_HINT="Ollama apiBase http://127.0.0.1:<port> — model tongyi-deepresearch-iq2s (manual GGUF bake)"
+    ;;
+  bugtrace)
+    SERVICE="bugtrace-apex-26b"
+    MODEL_HINT="Ollama apiBase http://127.0.0.1:<port> — model hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest"
     ;;
   deephat)
     SERVICE="deephat-vllm-7b-prebaked"
