@@ -11,6 +11,11 @@ set -euo pipefail
 #   SERVICE, OLLAMA_MODEL_NAME, GGUF_URL, MEMORY, MIN_INSTANCES, BUILD_TIMEOUT
 
 PROJECT_ID="${PROJECT_ID:-your-project-id}"
+if [[ "${PROJECT_ID}" == "your-project-id" ]]; then
+  echo "PROJECT_ID is not set."
+  echo "Run with: PROJECT_ID=\"<your-gcp-project-id>\" ./deploy-tongyi.sh"
+  exit 1
+fi
 REGION="${REGION:-europe-west1}"
 REPO="${REPO:-ai-models}"
 SERVICE="${SERVICE:-tongyi-deepresearch-iq2s}"
