@@ -77,9 +77,9 @@ gcloud auth configure-docker europe-west1-docker.pkg.dev
 **Cloud Run GPU defaults** (in `deploy.sh` since 2026-06):
 
 - **`--no-gpu-zonal-redundancy`** — avoids the interactive GPU quota prompt on L4.
-- **`OLLAMA_LLM_LIBRARY=cuda_v13`** — Cloud Run L4 ships driver **535 / CUDA 12.2**; without this, Ollama **0.30.x** often picks **`cuda_v12`** and fails at first inference with **`device kernel image is invalid`**.
+- **Image pinned to `ollama/ollama:0.24.0`** — Cloud Run L4 ships driver **535 / CUDA 12.2**. Every Ollama release from **`v0.30.0`** onward (confirmed through the latest, `v0.31.1`, as of 2026-07-05) fails to detect/use the L4 GPU at all: it either silently falls back to CPU (`inference compute id=cpu`), or crashes at first inference with `CUDA error: device kernel image is invalid` after logging `could not determine compute capability for CUDA device`. This is a regression from a major internal engine rewrite (the abandoned `v0.25.0-rc0` line became a 32-RC rewrite that shipped as `v0.30.0`) that switched the default CUDA build to use compressed kernels requiring **driver 550+** — see **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)** (closed as working-as-intended: binary releases will not support driver <550 again). Cloud Run does not let us change the host driver, so this is permanent as long as L4 stays on driver 535. **`v0.24.0`** is the most recent release confirmed to correctly detect and use the L4 GPU via `cuda_v12`, for both Qwen3MoE (Tongyi) and Gemma 4 (BugTraceAI). No `OLLAMA_LLM_LIBRARY` override is needed or used with this pinned version.
 
-Override env vars: `SET_ENV_VARS="OLLAMA_LLM_LIBRARY=cuda_v13,OLLAMA_KEEP_ALIVE=-1" ./deploy.sh`
+Override env vars: `SET_ENV_VARS="OLLAMA_KEEP_ALIVE=-1" ./deploy.sh`
 
 ```bash
 MODEL_NAME="qwen3:8b" SERVICE="qwen3-8b" ./deploy.sh
@@ -188,7 +188,7 @@ Unlike Tongyi (manual GGUF download), this path uses **`ollama pull hf.co/...`**
 | File | Role |
 |------|------|
 | `Dockerfile.bugtrace` | Runs `ollama pull` at build time with `HUGGING_FACE_HUB_TOKEN` |
-| `deploy-bugtrace.sh` | Cloud Build + deploy to Cloud Run (L4, `OLLAMA_LLM_LIBRARY=cuda_v13`) |
+| `deploy-bugtrace.sh` | Cloud Build + deploy to Cloud Run (L4, image pinned to `ollama/ollama:0.24.0`) |
 
 **Deploy** (HF token required — pass via env, never commit):
 
@@ -470,7 +470,7 @@ Typical layout (pick **one** Ollama-backed tab on **`11434`** at a time):
 |-------------------|---------|----------|-------------------|
 | `qwen3-8b` | Ollama | `qwen3:8b` | **Continue** — native **`tool_use`** (chat + edit + agent-style tools when Continue drives them). Proxy **`11434`**. |
 | `deepseek-r1-8b` | Ollama | `deepseek-r1:8b` | **Continue — chat only** ([library](https://ollama.com/library/deepseek-r1)). **Not** for **`offsec_agent_loop.py`** (no reliable tool support here). Proxy **`11434`** (`./proxy.sh deepseek`). |
-| `tongyi-deepresearch-iq2s` | Ollama | `tongyi-deepresearch-iq2s` | **Chat / benchmarks** — manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)). Proxy **`11434`** (`./proxy.sh tongyi`). Requires **`OLLAMA_LLM_LIBRARY=cuda_v13`** on L4. |
+| `tongyi-deepresearch-iq2s` | Ollama | `tongyi-deepresearch-iq2s` | **Chat / benchmarks** — manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)). Proxy **`11434`** (`./proxy.sh tongyi`). Image pinned to **`ollama/ollama:0.24.0`** for L4 GPU support. |
 | `bugtrace-apex-26b` | Ollama | `hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest` | **Benchmarks / red-team chat** — HF **`hf.co` pull** bake ([§1.2](#12-deploy-bugtrace-apex-26b-q4-ollama-hfco-pull)). Proxy **`11434`** (`./proxy.sh bugtrace`). **26B Q4 on L4 is tight** — use **`max_tokens=4096`** for fair v2 comparison. |
 | `deephat-vllm-7b-prebaked` | vLLM | `DeepHat/DeepHat-V1-7B` | **`scripts/offsec_agent_loop.py --backend openai`** — OpenAI-compatible **`/v1`**. Proxy **`8080`**. Continue can use **`provider: openai`** + **`apiBase: …/v1`** for **chat** if you want; agent UX varies by Continue version. |
 
@@ -781,7 +781,7 @@ NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VR
 
 2. **GPU quota / zonal redundancy** — `You do not have quota for using GPUs with zonal redundancy`. Answer **`Y`** at the prompt, or deploy with **`--no-gpu-zonal-redundancy`** (already default in `deploy.sh` / `deploy-tongyi.sh`).
 
-3. **`CUDA error: device kernel image is invalid`** on L4 — Ollama picked **`cuda_v12`** against Cloud Run driver **535**. Fix: **`gcloud run services update SERVICE --set-env-vars OLLAMA_LLM_LIBRARY=cuda_v13`** (default in `deploy.sh`).
+3. **`CUDA error: device kernel image is invalid`** or silent CPU fallback (`inference compute id=cpu`) on L4 — Ollama **`v0.30.0`+** (including the current `latest`, confirmed through `v0.31.1`) cannot detect/use the L4 GPU at all. Root cause and maintainer response: **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)** (closed — driver 535 is no longer supported by binary releases). Fix: pin the image to **`ollama/ollama:0.24.0`** (already default in `Dockerfile`, `Dockerfile.tongyi`, `Dockerfile.bugtrace`) and rebuild — do **not** try to fix this with `OLLAMA_LLM_LIBRARY`, it does not help on `v0.30.0+`. After redeploying, also **`--clear-env-vars`** (or reuse the deploy scripts, which now do this automatically) — Cloud Run persists env vars across revisions, so a stale `OLLAMA_LLM_LIBRARY` from an older debugging attempt can silently survive onto a new revision and reintroduce the failure.
 
 4. **`Repository is not GGUF or is not compatible with llama.cpp`** during `ollama pull hf.co/...` in Cloud Build — use manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)) or **vLLM**.
 

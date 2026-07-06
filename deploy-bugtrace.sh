@@ -24,6 +24,8 @@ MAX_INSTANCES="${MAX_INSTANCES:-1}"
 TIMEOUT="${TIMEOUT:-3600}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-14400s}"
 HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}"
+# No OLLAMA_LLM_LIBRARY override: the image is pinned to ollama/ollama:0.24.0,
+# which auto-detects cuda_v12 correctly on Cloud Run L4 (see Dockerfile.bugtrace).
 
 if [[ -z "${HUGGING_FACE_HUB_TOKEN}" ]]; then
   echo "HUGGING_FACE_HUB_TOKEN is required."
@@ -104,7 +106,7 @@ gcloud run deploy "${SERVICE}" \
   --port 11434 \
   --timeout "${TIMEOUT}" \
   --no-allow-unauthenticated \
-  --set-env-vars "OLLAMA_LLM_LIBRARY=cuda_v13"
+  --clear-env-vars
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.url)')"
 

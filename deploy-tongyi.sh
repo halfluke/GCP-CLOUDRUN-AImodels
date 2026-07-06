@@ -26,8 +26,11 @@ MAX_INSTANCES="${MAX_INSTANCES:-1}"
 TIMEOUT="${TIMEOUT:-3600}"
 ALLOW_UNAUTH="${ALLOW_UNAUTH:-false}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-7200s}"
-# Cloud Run L4 (driver 535 / CUDA 12.2) needs cuda_v13; cuda_v12 hits "device kernel image is invalid"
-SET_ENV_VARS="${SET_ENV_VARS:-OLLAMA_LLM_LIBRARY=cuda_v13}"
+# No OLLAMA_LLM_LIBRARY override: the image is pinned to ollama/ollama:0.24.0,
+# which auto-detects cuda_v12 correctly on Cloud Run L4. Newer Ollama releases
+# (v0.30.0+) broke GPU detection on L4 outright, so this is no longer a
+# backend-selection workaround, it's a version pin (see Dockerfile.tongyi).
+SET_ENV_VARS="${SET_ENV_VARS:-}"
 
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${SERVICE}"
 
@@ -114,6 +117,11 @@ fi
 
 if [[ -n "${SET_ENV_VARS}" ]]; then
   DEPLOY_ARGS+=(--set-env-vars "${SET_ENV_VARS}")
+else
+  # Cloud Run persists env vars across deploys unless explicitly cleared.
+  # Without this, a stale OLLAMA_LLM_LIBRARY from a previous revision would
+  # silently survive and override the image's correct auto-detected backend.
+  DEPLOY_ARGS+=(--clear-env-vars)
 fi
 
 gcloud "${DEPLOY_ARGS[@]}"
