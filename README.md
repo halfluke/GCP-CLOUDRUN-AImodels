@@ -77,7 +77,7 @@ gcloud auth configure-docker europe-west1-docker.pkg.dev
 **Cloud Run GPU defaults** (in `deploy.sh` since 2026-06):
 
 - **`--no-gpu-zonal-redundancy`** — avoids the interactive GPU quota prompt on L4.
-- **Image pinned to `ollama/ollama:0.24.0`** — Cloud Run L4 ships driver **535 / CUDA 12.2**. Every Ollama release from **`v0.30.0`** onward (confirmed through the latest, `v0.31.1`, as of 2026-07-05) fails to detect/use the L4 GPU at all: it either silently falls back to CPU (`inference compute id=cpu`), or crashes at first inference with `CUDA error: device kernel image is invalid` after logging `could not determine compute capability for CUDA device`. This is a regression from a major internal engine rewrite (the abandoned `v0.25.0-rc0` line became a 32-RC rewrite that shipped as `v0.30.0`) that switched the default CUDA build to use compressed kernels requiring **driver 550+** — see **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)** (closed as working-as-intended: binary releases will not support driver <550 again). Cloud Run does not let us change the host driver, so this is permanent as long as L4 stays on driver 535. **`v0.24.0`** is the most recent release confirmed to correctly detect and use the L4 GPU via `cuda_v12`, for both Qwen3MoE (Tongyi) and Gemma 4 (BugTraceAI). No `OLLAMA_LLM_LIBRARY` override is needed or used with this pinned version.
+- **Image pinned to `ollama/ollama:0.24.0`** — keep this pin. Ollama **`v0.30.0`+** (confirmed through `v0.31.1`, as of 2026-07-05) often fails on Cloud Run L4: silent CPU fallback (`inference compute id=cpu`) or `CUDA error: device kernel image is invalid` after `could not determine compute capability for CUDA device` — see **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)**. Host GPU drivers can move under us (historically **535 / CUDA 12.2**; as of **2026-08** BugTrace logs also show **CUDA driver 13.0** with Ollama loading `cuda_v13`). **`v0.24.0`** remains the pin that works for Tongyi / BugTraceAI on L4. No `OLLAMA_LLM_LIBRARY` override is needed with this version.
 
 Override env vars: `SET_ENV_VARS="OLLAMA_KEEP_ALIVE=-1" ./deploy.sh`
 
@@ -422,6 +422,24 @@ SERVICE="deephat-vllm-7b-prebaked" \
 
 - HF token: **read** scope is enough for public models.
 - Pre-baked builds are slower/larger; Cloud Run startup is usually more reliable than runtime HF download.
+- **CUDA / Error 803:** deploy scripts default to
+  `VLLM_ENABLE_CUDA_COMPATIBILITY=0` and
+  `LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu`.
+  On current Cloud Run L4 hosts (CUDA driver **13.x** / NVIDIA **580+**), enabling
+  vLLM cuda-compat makes the engine fail at startup with
+  `Error 803: unsupported display driver / cuda driver combination`
+  (container compat libs shadow the host-mounted driver — see
+  [vllm#35593](https://github.com/vllm-project/vllm/issues/35593)).
+  **Fix without rebuilding the image:**
+
+```bash
+gcloud run services update deephat-vllm-7b-prebaked \
+  --region europe-west1 \
+  --update-env-vars="VLLM_ENABLE_CUDA_COMPATIBILITY=0,LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu,UNSTICK_NONCE=$(date +%s)"
+```
+
+  Only set `VLLM_ENABLE_CUDA_COMPATIBILITY=1` if you are on an older host that
+  truly needs forward-compat (not the current L4 fleet as of 2026-08).
 
 ### Proxy and smoke test
 
@@ -781,25 +799,29 @@ NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VR
 
 2. **GPU quota / zonal redundancy** — `You do not have quota for using GPUs with zonal redundancy`. Answer **`Y`** at the prompt, or deploy with **`--no-gpu-zonal-redundancy`** (already default in `deploy.sh` / `deploy-tongyi.sh`).
 
-3. **`CUDA error: device kernel image is invalid`** or silent CPU fallback (`inference compute id=cpu`) on L4 — Ollama **`v0.30.0`+** (including the current `latest`, confirmed through `v0.31.1`) cannot detect/use the L4 GPU at all. Root cause and maintainer response: **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)** (closed — driver 535 is no longer supported by binary releases). Fix: pin the image to **`ollama/ollama:0.24.0`** (already default in `Dockerfile`, `Dockerfile.tongyi`, `Dockerfile.bugtrace`) and rebuild — do **not** try to fix this with `OLLAMA_LLM_LIBRARY`, it does not help on `v0.30.0+`. After redeploying, also **`--clear-env-vars`** (or reuse the deploy scripts, which now do this automatically) — Cloud Run persists env vars across revisions, so a stale `OLLAMA_LLM_LIBRARY` from an older debugging attempt can silently survive onto a new revision and reintroduce the failure.
+3. **`CUDA error: device kernel image is invalid`** or silent CPU fallback (`inference compute id=cpu`) on L4 — Ollama **`v0.30.0`+** (including the current `latest`, confirmed through `v0.31.1`) often cannot use the L4 GPU. Root cause / maintainer response: **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)**. Fix: pin the image to **`ollama/ollama:0.24.0`** (already default in `Dockerfile`, `Dockerfile.tongyi`, `Dockerfile.bugtrace`) and rebuild — do **not** try to fix this with `OLLAMA_LLM_LIBRARY`. After redeploying, also **`--clear-env-vars`** (or reuse the deploy scripts, which clear stale overrides) — Cloud Run persists env vars across revisions.
 
-4. **`Repository is not GGUF or is not compatible with llama.cpp`** during `ollama pull hf.co/...` in Cloud Build — use manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)) or **vLLM**.
+4. **vLLM `Error 803: unsupported display driver / cuda driver combination`** on L4 — almost always **cuda-compat libs inside the vLLM image conflicting with a newer host driver** (CUDA **13.x** / NVIDIA **580+**), not a missing GPU. Do **not** rebuild the model image first. Set **`VLLM_ENABLE_CUDA_COMPATIBILITY=0`** and
+   `LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu`
+   (defaults in `deploy-vllm*.sh` / `Dockerfile.vllm*`). Confirmed working on DeepHat without an image rebuild (2026-08). See [§4](#4-vllm-hugging-face-models-openai-compatible-api) and [vllm#35593](https://github.com/vllm-project/vllm/issues/35593).
 
-5. **Cloud Build looks stuck at curl ~1080 bytes** — that line is the HF redirect; the **~8.7 GB** download continues with little log output for 15–40 min.
+5. **`Repository is not GGUF or is not compatible with llama.cpp`** during `ollama pull hf.co/...` in Cloud Build — use manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)) or **vLLM**.
 
-6. **Empty `gcloud run services logs tail`** — build logs live in **Cloud Build**, not Cloud Run; runtime logs stay quiet until the revision is **Ready** and something hits **`/api/generate`**.
+6. **Cloud Build looks stuck at curl ~1080 bytes** — that line is the HF redirect; the **~8.7 GB** download continues with little log output for 15–40 min.
 
-7. **Wrong project/region** — `gcloud config get-value project` and `run/region`.
+7. **Empty `gcloud run services logs tail`** — build logs live in **Cloud Build**, not Cloud Run; runtime logs stay quiet until the revision is **Ready** and something hits **`/api/generate`**.
 
-8. **OpenWebUI cannot reach Ollama** — keep `proxy` + `socat` running; URL must match (`http://172.17.0.1:11434` in the example above).
+8. **Wrong project/region** — `gcloud config get-value project` and `run/region`.
 
-9. **Continue cannot find models** — proxy running? `curl -s http://127.0.0.1:11434/api/tags` — use exact `model` string; `provider: ollama` uses `http://127.0.0.1:11434` without `/v1`.
+9. **OpenWebUI cannot reach Ollama** — keep `proxy` + `socat` running; URL must match (`http://172.17.0.1:11434` in the example above).
 
-10. **`model not found` from Ollama** — pull locally (`ollama pull <name>`) or ensure Cloud Run image contains that tag; match `/api/tags` names exactly.
+10. **Continue cannot find models** — proxy running? `curl -s http://127.0.0.1:11434/api/tags` — use exact `model` string; `provider: ollama` uses `http://127.0.0.1:11434` without `/v1`.
 
-11. **vLLM HTTP 400 — maximum context length** — input (history + tools JSON + tool definitions) plus **`max_tokens`** exceeds **`MAX_MODEL_LEN`**. Fix: **`gcloud run services update … MAX_MODEL_LEN=…`**, set matching **`--context-limit`** on **`offsec_agent_loop.py`**, lower **`--max-tokens`**, or rely on **`--tool-list-cap`** / **`--tool-chars-cap`** to shrink tool messages.
+11. **`model not found` from Ollama** — pull locally (`ollama pull <name>`) or ensure Cloud Run image contains that tag; match `/api/tags` names exactly.
 
-12. **DeepSeek-R1 + agent loop** — **`offsec_agent_loop.py`** expects **`tool_calls`** (or parseable JSON-in-text patterns). DeepSeek-R1 on Ollama **does not** support that workflow reliably here → **Continue chat only**, or use **Qwen** / **DeepHat** for tooling.
+12. **vLLM HTTP 400 — maximum context length** — input (history + tools JSON + tool definitions) plus **`max_tokens`** exceeds **`MAX_MODEL_LEN`**. Fix: **`gcloud run services update … MAX_MODEL_LEN=…`**, set matching **`--context-limit`** on **`offsec_agent_loop.py`**, lower **`--max-tokens`**, or rely on **`--tool-list-cap`** / **`--tool-chars-cap`** to shrink tool messages.
+
+13. **DeepSeek-R1 + agent loop** — **`offsec_agent_loop.py`** expects **`tool_calls`** (or parseable JSON-in-text patterns). DeepSeek-R1 on Ollama **does not** support that workflow reliably here → **Continue chat only**, or use **Qwen** / **DeepHat** for tooling.
 
 ---
 

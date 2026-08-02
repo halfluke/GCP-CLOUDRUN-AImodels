@@ -10,7 +10,10 @@ ENV SERVE_MODEL_NAME=${MODEL_ID}
 ENV DTYPE=auto
 ENV MAX_MODEL_LEN=4096
 ENV GPU_MEMORY_UTILIZATION=0.85
-ENV VLLM_ENABLE_CUDA_COMPATIBILITY=1
+# Prefer host NVIDIA libs on Cloud Run L4 (driver 580+/CUDA 13). Enabling
+# cuda-compat here causes Error 803 on current hosts — see deploy-vllm-prebaked.sh.
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu
 ENV ENABLE_AUTO_TOOL_CHOICE=true
 ENV TOOL_CALL_PARSER=hermes
 
