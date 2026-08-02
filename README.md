@@ -31,7 +31,9 @@ Minimal commands for deploying **Ollama** and **vLLM** on **Google Cloud Run**, 
 - [Streamlit UI (optional)](#streamlit-ui-optional) — *subsection of §3*
 - [Optional: OpenWebUI](#8-optional-openwebui-bridge)
 - [L4 sizing](#9-l4-sizing-quick-guide)
-- [Common errors](#10-common-errors)
+- [Host GPU driver drift (expect periodic fixes)](#10-host-gpu-driver-drift-expect-periodic-fixes)
+- [Common errors](#11-common-errors)
+- [Checking whether services are scaled to zero](#12-checking-whether-services-are-scaled-to-zero)
 
 On **github.com**, if a jump link above does not match (GitHub’s slug rules can change), use the **Outline** (≡) on the rendered `README` for working section anchors.
 
@@ -793,7 +795,27 @@ NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VR
 - Large FP16 weights + long context can stall or OOM.
 - If `/api/tags` works but generation hangs, suspect VRAM/load before blaming the client.
 
-## 10) Common errors
+## 10) Host GPU driver drift (expect periodic fixes)
+
+Cloud Run owns the **host NVIDIA driver**; you cannot pin or choose it. Google can (and does) roll that under existing services. Your **image digest can stay identical** and still break after a long idle cold start, because the new host no longer matches the CUDA assumptions baked into Ollama / vLLM.
+
+Treat GPU Cloud Run as **periodic maintenance**, not a one-time forever deploy:
+
+| Stack | Typical breakage after a host roll | Usual fix |
+|-------|-------------------------------------|-----------|
+| **Ollama** | Silent CPU fallback, `device kernel image is invalid`, wrong/missing CUDA backend | Keep / move the **image pin** (today: `ollama/ollama:0.24.0`); check `/api/ps` VRAM and server logs |
+| **vLLM** | `Error 803: unsupported display driver / cuda driver combination` | Prefer **env** first: `VLLM_ENABLE_CUDA_COMPATIBILITY=0` + host `LD_LIBRARY_PATH` (see [§4](#4-vllm-hugging-face-models-openai-compatible-api)); rebuild only if that fails |
+| **Ops / gcloud** | Flags or scale semantics change (e.g. `max-instances=0` rejected) | Update helper scripts; do not assume last year’s hard-stop still works |
+
+**When a previously working service fails after weeks idle:**
+
+1. Read **Cloud Run revision logs** for CUDA / driver / 803 / CPU-fallback lines before rebuilding.
+2. Confirm whether **BugTrace / Tongyi** (Ollama) and **DeepHat** (vLLM) fail the same way — often only one stack is affected.
+3. Apply the smallest fix (env or pin), then update this repo’s defaults so the next deploy does not regress.
+
+Documented host shifts so far: historically **535 / CUDA 12.2**; as of **2026-08** L4 instances also report **CUDA driver 13.0** (Ollama `cuda_v13`), which is what surfaced vLLM Error 803 until cuda-compat was turned off.
+
+## 11) Common errors
 
 1. **`403` / `401` on Cloud Run** — missing/expired identity token or wrong account. Run `gcloud auth login` and use `gcloud auth print-identity-token`.
 
@@ -825,7 +847,7 @@ NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VR
 
 ---
 
-## 11) Checking whether services are scaled to zero
+## 12) Checking whether services are scaled to zero
 
 Use the Cloud Monitoring REST API — it queries the control plane only and does **not** wake up any service.
 
