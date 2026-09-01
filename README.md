@@ -20,8 +20,7 @@ Minimal commands for deploying **Ollama** and **vLLM** on **Google Cloud Run**, 
 
 - [One-time setup](#0-one-time-setup-per-project-region)
 - [Deploy Ollama](#1-deploy-ollama)
-- [Deploy Hugging Face GGUF (Tongyi / manual bake)](#11-deploy-hugging-face-gguf-tongyi--manual-bake)
-- [Deploy BugTrace Apex 26B Q4 (Ollama hf.co pull)](#12-deploy-bugtrace-apex-26b-q4-ollama-hfco-pull)
+- [Deploy BugTrace Apex 26B Q4 (Ollama hf.co pull)](#11-deploy-bugtrace-apex-26b-q4-ollama-hfco-pull)
 - [Test & destroy](#2-test-destroy)
 - [Tools: docs, “tool compatible” labels, and workarounds](#3-tools-docs-tool-compatible-labels-and-workarounds)
 - [vLLM (HF models, OpenAI-style API)](#4-vllm-hugging-face-models-openai-compatible-api)
@@ -79,7 +78,7 @@ gcloud auth configure-docker europe-west1-docker.pkg.dev
 **Cloud Run GPU defaults** (in `deploy.sh` since 2026-06):
 
 - **`--no-gpu-zonal-redundancy`** — avoids the interactive GPU quota prompt on L4.
-- **Image pinned to `ollama/ollama:0.24.0`** — keep this pin. Ollama **`v0.30.0`+** (confirmed through `v0.31.1`, as of 2026-07-05) often fails on Cloud Run L4: silent CPU fallback (`inference compute id=cpu`) or `CUDA error: device kernel image is invalid` after `could not determine compute capability for CUDA device` — see **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)**. Host GPU drivers can move under us (historically **535 / CUDA 12.2**; as of **2026-08** BugTrace logs also show **CUDA driver 13.0** with Ollama loading `cuda_v13`). **`v0.24.0`** remains the pin that works for Tongyi / BugTraceAI on L4. No `OLLAMA_LLM_LIBRARY` override is needed with this version.
+- **Image pinned to `ollama/ollama:0.24.0`** — keep this pin. Ollama **`v0.30.0`+** (confirmed through `v0.31.1`, as of 2026-07-05) often fails on Cloud Run L4: silent CPU fallback (`inference compute id=cpu`) or `CUDA error: device kernel image is invalid` after `could not determine compute capability for CUDA device` — see **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)**. Host GPU drivers can move under us (historically **535 / CUDA 12.2**; as of **2026-08** BugTrace logs also show **CUDA driver 13.0** with Ollama loading `cuda_v13`). **`v0.24.0`** remains the pin that works for Ollama bakes on L4 (e.g. Qwen3, BugTraceAI). No `OLLAMA_LLM_LIBRARY` override is needed with this version.
 
 Override env vars: `SET_ENV_VARS="OLLAMA_KEEP_ALIVE=-1" ./deploy.sh`
 
@@ -141,51 +140,11 @@ For **Continue**, start with a **moderate `contextLength`** (e.g. **8192**). The
 
 **Do not use `scripts/offsec_agent_loop.py` with DeepSeek-R1** in this setup: the tag does **not** reliably expose **Ollama structured tools** / **`tool_calls`**, so the loop cannot drive workspace tools. Use **Continue (chat only)** for reasoning; switch proxy to **Qwen** or **DeepHat** when you need the Python agent loop.
 
-### 1.1) Deploy Hugging Face GGUF (Tongyi / manual bake)
-
-Some Hugging Face repos **cannot** use `ollama pull hf.co/...` in Cloud Build (e.g. **`Repository is not GGUF or is not compatible with llama.cpp`** for MoE repos). For those, bake the **`.gguf`** in the image and **`ollama create`** a short local name.
-
-**Example:** [Tongyi DeepResearch 30B-A3B IQ2_S](https://huggingface.co/bartowski/Alibaba-NLP_Tongyi-DeepResearch-30B-A3B-GGUF) (~8.7 GB, fits 1× L4).
-
-| File | Role |
-|------|------|
-| `Dockerfile.tongyi` | Downloads GGUF in Cloud Build, runs `ollama create` |
-| `Modelfile.tongyi` | Points at the baked file (`num_ctx 8192`) |
-| `deploy-tongyi.sh` | Build + deploy + smoke test (same L4 flags as `deploy.sh`) |
-
-```bash
-chmod +x ./deploy-tongyi.sh
-
-PROJECT_ID="your-project-id" \
-REGION="europe-west1" \
-SERVICE="tongyi-deepresearch-iq2s" \
-OLLAMA_MODEL_NAME="tongyi-deepresearch-iq2s" \
-./deploy-tongyi.sh
-```
-
-- **Build time:** ~20–40 min (8.7 GB download in Cloud Build; curl may look idle after a ~1 KB redirect line — normal).
-- **API model name:** use **`tongyi-deepresearch-iq2s`** (not the long HF path) — check with `/api/tags`.
-- **Proxy:** `PROJECT_ID="your-project-id" ./proxy.sh tongyi`
-- **Cost:** default **`MIN_INSTANCES=0`** (scale to zero). Only set **`MIN_INSTANCES=1`** for a benchmark session — an L4 GPU idling 24/7 is expensive.
-- **Benchmark** (with proxy on `11434`):  
-  `uv run run_benchmark.py run ollama -m "tongyi-deepresearch-iq2s" --config configs/cloudrun_ollama.yaml`
-
-Optional overrides:
-
-```bash
-GGUF_FILE="Alibaba-NLP_Tongyi-DeepResearch-30B-A3B-IQ4_XS.gguf" \
-GGUF_URL="https://huggingface.co/bartowski/Alibaba-NLP_Tongyi-DeepResearch-30B-A3B-GGUF/resolve/main/Alibaba-NLP_Tongyi-DeepResearch-30B-A3B-IQ4_XS.gguf" \
-OLLAMA_MODEL_NAME="tongyi-deepresearch-iq4xs" \
-./deploy-tongyi.sh
-```
-
-If **`ollama create`** fails at build time (unknown architecture), use **vLLM** with the upstream HF model `Alibaba-NLP/Tongyi-DeepResearch-30B-A3B` instead ([§4](#4-vllm-hugging-face-models-openai-compatible-api)).
-
-### 1.2) Deploy BugTrace Apex 26B Q4 (Ollama hf.co pull)
+### 1.1) Deploy BugTrace Apex 26B Q4 (Ollama hf.co pull)
 
 [BugTraceAI-Apex-G4-26B-Q4](https://huggingface.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4) is a **26B** GGUF (~**14 GB** Q4) tuned for offensive-security / red-team reasoning. It ranks highly on the upstream **Red Team AI Benchmark v2** rubric when run with **`max_tokens=4096`**. On **1× L4 (24 GB VRAM)** it is **tight but workable** with Q4 quantization — expect slower cold starts and moderate context limits compared to 7B/8B models.
 
-Unlike Tongyi (manual GGUF download), this path uses **`ollama pull hf.co/...`** during **Cloud Build**, similar to a standard Ollama hub pull but authenticated against Hugging Face.
+This path uses **`ollama pull hf.co/...`** during **Cloud Build**, similar to a standard Ollama hub pull but authenticated against Hugging Face.
 
 | File | Role |
 |------|------|
@@ -490,11 +449,10 @@ Typical layout (pick **one** Ollama-backed tab on **`11434`** at a time):
 |-------------------|---------|----------|-------------------|
 | `qwen3-8b` | Ollama | `qwen3:8b` | **Continue** — native **`tool_use`** (chat + edit + agent-style tools when Continue drives them). Proxy **`11434`**. |
 | `deepseek-r1-8b` | Ollama | `deepseek-r1:8b` | **Continue — chat only** ([library](https://ollama.com/library/deepseek-r1)). **Not** for **`offsec_agent_loop.py`** (no reliable tool support here). Proxy **`11434`** (`./proxy.sh deepseek`). |
-| `tongyi-deepresearch-iq2s` | Ollama | `tongyi-deepresearch-iq2s` | **Chat / benchmarks** — manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)). Proxy **`11434`** (`./proxy.sh tongyi`). Image pinned to **`ollama/ollama:0.24.0`** for L4 GPU support. |
-| `bugtrace-apex-26b` | Ollama | `hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest` | **Benchmarks / red-team chat** — HF **`hf.co` pull** bake ([§1.2](#12-deploy-bugtrace-apex-26b-q4-ollama-hfco-pull)). Proxy **`11434`** (`./proxy.sh bugtrace`). **26B Q4 on L4 is tight** — use **`max_tokens=4096`** for fair v2 comparison. |
+| `bugtrace-apex-26b` | Ollama | `hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest` | **Benchmarks / red-team chat** — HF **`hf.co` pull** bake ([§1.1](#11-deploy-bugtrace-apex-26b-q4-ollama-hfco-pull)). Proxy **`11434`** (`./proxy.sh bugtrace`). **26B Q4 on L4 is tight** — use **`max_tokens=4096`** for fair v2 comparison. |
 | `deephat-vllm-7b-prebaked` | vLLM | `DeepHat/DeepHat-V1-7B` | **`scripts/offsec_agent_loop.py --backend openai`** — OpenAI-compatible **`/v1`**. Proxy **`8080`**. Continue can use **`provider: openai`** + **`apiBase: …/v1`** for **chat** if you want; agent UX varies by Continue version. |
 
-**Ports:** only **one** process should own **`127.0.0.1:11434`** at a time (pick **one** among **Qwen**, **DeepSeek-R1**, **Tongyi**, **BugTrace**). DeepHat uses **`8080`** so it can run alongside an Ollama proxy.
+**Ports:** only **one** process should own **`127.0.0.1:11434`** at a time (pick **one** among **Qwen**, **DeepSeek-R1**, **BugTrace**). DeepHat uses **`8080`** so it can run alongside an Ollama proxy.
 
 ### Python agent loop — DeepHat (`MAX_MODEL_LEN=8192`)
 
@@ -716,7 +674,7 @@ Reload after edits: VS Code command palette → **Continue: Reload Config**.
 
 ### One proxy port = one Cloud Run service
 
-**`11434`** → whichever **Ollama** service you proxied last (**Qwen**, **DeepSeek-R1**, **Tongyi**). **`8080`** → **DeepHat vLLM** (can run **at the same time** as **`11434`**).
+**`11434`** → whichever **Ollama** service you proxied last (**Qwen**, **DeepSeek-R1**, **BugTrace**). **`8080`** → **DeepHat vLLM** (can run **at the same time** as **`11434`**).
 
 ### Capability sanity check
 
@@ -739,10 +697,9 @@ Use the exact `name` from `/api/tags` in Continue’s `model` field. For **`prov
 | Script | Purpose |
 |--------|---------|
 | `scripts/offsec_streamlit_app.py` | Optional **Streamlit** front-end for the Python agent loop (see [Streamlit UI](#streamlit-ui-optional)); `pip install -r requirements-streamlit.txt` then `streamlit run scripts/offsec_streamlit_app.py`. |
-| `./deploy-tongyi.sh` | Build **`Dockerfile.tongyi`** (manual HF GGUF bake) and deploy Tongyi DeepResearch (or override **`GGUF_URL`** / **`OLLAMA_MODEL_NAME`**). |
 | `./deploy-bugtrace.sh` | Build **`Dockerfile.bugtrace`** (Ollama **`hf.co` pull** at build time) and deploy BugTrace Apex 26B Q4. Requires **`HUGGING_FACE_HUB_TOKEN`**. |
-| `./proxy.sh` | `gcloud run services proxy` helper: **`qwen`** → `qwen3-8b`, **`deepseek`** → `deepseek-r1-8b`, **`tongyi`** → `tongyi-deepresearch-iq2s`, **`bugtrace`** → `bugtrace-apex-26b`, **`deephat`** → `deephat-vllm-7b-prebaked` (local port **8080** by default), **`list`**, or pass any Cloud Run **service name**. Override port with **`PORT=…`**. |
-| `./unstick.sh` | Same shortcuts as **`proxy.sh`** (**`qwen`**, **`deepseek`**, **`tongyi`**, **`bugtrace`**, **`deephat`**, or raw service name) — bumps **`UNSTICK_NONCE`** to roll the revision |
+| `./proxy.sh` | `gcloud run services proxy` helper: **`qwen`** → `qwen3-8b`, **`deepseek`** → `deepseek-r1-8b`, **`bugtrace`** → `bugtrace-apex-26b`, **`deephat`** → `deephat-vllm-7b-prebaked` (local port **8080** by default), **`list`**, or pass any Cloud Run **service name**. Override port with **`PORT=…`**. |
+| `./unstick.sh` | Same shortcuts as **`proxy.sh`** (**`qwen`**, **`deepseek`**, **`bugtrace`**, **`deephat`**, or raw service name) — bumps **`UNSTICK_NONCE`** to roll the revision |
 
 Examples:
 
@@ -789,7 +746,7 @@ http://172.17.0.1:11434
 NVIDIA L4 has **24 GB VRAM**. Cloud Run `--memory` is **system RAM**, not GPU VRAM.
 
 - 7B/8B quantized (Q4/Q5): usually comfortable on 1× L4.
-- MoE ~8–10 GB IQ quants (e.g. Tongyi IQ2_S): fits 1× L4 with moderate context.
+- MoE ~8–10 GB IQ quants: fits 1× L4 with moderate context.
 - **26B Q4** (e.g. BugTrace Apex G4): ~14 GB weights — fits 1× L4 but leaves little headroom; prefer moderate context and **`max_tokens`** caps.
 - 13B: often workable; context and concurrency matter.
 - Large FP16 weights + long context can stall or OOM.
@@ -810,7 +767,7 @@ Treat GPU Cloud Run as **periodic maintenance**, not a one-time forever deploy:
 **When a previously working service fails after weeks idle:**
 
 1. Read **Cloud Run revision logs** for CUDA / driver / 803 / CPU-fallback lines before rebuilding.
-2. Confirm whether **BugTrace / Tongyi** (Ollama) and **DeepHat** (vLLM) fail the same way — often only one stack is affected.
+2. Confirm whether **BugTrace** (Ollama) and **DeepHat** (vLLM) fail the same way — often only one stack is affected.
 3. Apply the smallest fix (env or pin), then update this repo’s defaults so the next deploy does not regress.
 
 Documented host shifts so far: historically **535 / CUDA 12.2**; as of **2026-08** L4 instances also report **CUDA driver 13.0** (Ollama `cuda_v13`), which is what surfaced vLLM Error 803 until cuda-compat was turned off.
@@ -819,15 +776,15 @@ Documented host shifts so far: historically **535 / CUDA 12.2**; as of **2026-08
 
 1. **`403` / `401` on Cloud Run** — missing/expired identity token or wrong account. Run `gcloud auth login` and use `gcloud auth print-identity-token`.
 
-2. **GPU quota / zonal redundancy** — `You do not have quota for using GPUs with zonal redundancy`. Answer **`Y`** at the prompt, or deploy with **`--no-gpu-zonal-redundancy`** (already default in `deploy.sh` / `deploy-tongyi.sh`).
+2. **GPU quota / zonal redundancy** — `You do not have quota for using GPUs with zonal redundancy`. Answer **`Y`** at the prompt, or deploy with **`--no-gpu-zonal-redundancy`** (already default in `deploy.sh` / `deploy-bugtrace.sh`).
 
-3. **`CUDA error: device kernel image is invalid`** or silent CPU fallback (`inference compute id=cpu`) on L4 — Ollama **`v0.30.0`+** (including the current `latest`, confirmed through `v0.31.1`) often cannot use the L4 GPU. Root cause / maintainer response: **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)**. Fix: pin the image to **`ollama/ollama:0.24.0`** (already default in `Dockerfile`, `Dockerfile.tongyi`, `Dockerfile.bugtrace`) and rebuild — do **not** try to fix this with `OLLAMA_LLM_LIBRARY`. After redeploying, also **`--clear-env-vars`** (or reuse the deploy scripts, which clear stale overrides) — Cloud Run persists env vars across revisions.
+3. **`CUDA error: device kernel image is invalid`** or silent CPU fallback (`inference compute id=cpu`) on L4 — Ollama **`v0.30.0`+** (including the current `latest`, confirmed through `v0.31.1`) often cannot use the L4 GPU. Root cause / maintainer response: **[ollama/ollama#16449](https://github.com/ollama/ollama/issues/16449)**. Fix: pin the image to **`ollama/ollama:0.24.0`** (already default in `Dockerfile`, `Dockerfile.bugtrace`) and rebuild — do **not** try to fix this with `OLLAMA_LLM_LIBRARY`. After redeploying, also **`--clear-env-vars`** (or reuse the deploy scripts, which clear stale overrides) — Cloud Run persists env vars across revisions.
 
 4. **vLLM `Error 803: unsupported display driver / cuda driver combination`** on L4 — almost always **cuda-compat libs inside the vLLM image conflicting with a newer host driver** (CUDA **13.x** / NVIDIA **580+**), not a missing GPU. Do **not** rebuild the model image first. Set **`VLLM_ENABLE_CUDA_COMPATIBILITY=0`** and
    `LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu`
    (defaults in `deploy-vllm*.sh` / `Dockerfile.vllm*`). Confirmed working on DeepHat without an image rebuild (2026-08). See [§4](#4-vllm-hugging-face-models-openai-compatible-api) and [vllm#35593](https://github.com/vllm-project/vllm/issues/35593).
 
-5. **`Repository is not GGUF or is not compatible with llama.cpp`** during `ollama pull hf.co/...` in Cloud Build — use manual GGUF bake ([§1.1](#11-deploy-hugging-face-gguf-tongyi--manual-bake)) or **vLLM**.
+5. **`Repository is not GGUF or is not compatible with llama.cpp`** during `ollama pull hf.co/...` in Cloud Build — try a different quant/repo, bake a compatible GGUF manually in a custom Dockerfile, or use **vLLM** with safetensors weights instead.
 
 6. **Cloud Build looks stuck at curl ~1080 bytes** — that line is the HF redirect; the **~8.7 GB** download continues with little log output for 15–40 min.
 

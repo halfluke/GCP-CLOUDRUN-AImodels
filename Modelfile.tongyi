@@ -1,2 +1,0 @@
-FROM /models/Alibaba-NLP_Tongyi-DeepResearch-30B-A3B-IQ2_S.gguf
-PARAMETER num_ctx 8192

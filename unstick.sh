@@ -16,7 +16,7 @@ REGION="${REGION:-europe-west1}"
 TARGET="${1:-}"
 
 if [[ -z "${TARGET}" ]]; then
-  echo "Usage: $0 {qwen|deepseek|redteam|nu11|tongyi|bugtrace|deephat|<service-name>}"
+  echo "Usage: $0 {qwen|deepseek|redteam|nu11|bugtrace|deephat|<service-name>}"
   exit 1
 fi
 
@@ -30,7 +30,6 @@ case "${TARGET}" in
   qwen) SERVICE="qwen3-8b" ;;
   deepseek) SERVICE="deepseek-r1-8b" ;;
   redteam | nu11) SERVICE="nu11-redteamlite-ollama" ;;
-  tongyi) SERVICE="tongyi-deepresearch-iq2s" ;;
   bugtrace) SERVICE="bugtrace-apex-26b" ;;
   deephat) SERVICE="deephat-vllm-7b-prebaked" ;;
   *) SERVICE="${TARGET}" ;;
